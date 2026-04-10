@@ -2,6 +2,7 @@ package com.grafana.sigil.sdk;
 
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.StatusCode;
+import io.opentelemetry.context.Scope;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -14,6 +15,8 @@ public class GenerationRecorder implements AutoCloseable {
     private final GenerationStart seed;
     private final Span span;
     private final Instant startedAt;
+    private final ContentCaptureMode contentCaptureMode;
+    private final Scope contentCaptureScope;
 
     private final Object lock = new Object();
     private boolean ended;
@@ -23,11 +26,14 @@ public class GenerationRecorder implements AutoCloseable {
     private Throwable finalError;
     private Generation lastGeneration;
 
-    GenerationRecorder(SigilClient client, GenerationStart seed, Span span, Instant startedAt) {
+    GenerationRecorder(SigilClient client, GenerationStart seed, Span span, Instant startedAt,
+                       ContentCaptureMode contentCaptureMode, Scope contentCaptureScope) {
         this.client = client;
         this.seed = seed;
         this.span = span;
         this.startedAt = startedAt;
+        this.contentCaptureMode = contentCaptureMode;
+        this.contentCaptureScope = contentCaptureScope;
     }
 
     /** Sets the mapped generation result payload. */
@@ -76,6 +82,12 @@ public class GenerationRecorder implements AutoCloseable {
         Instant completedAt = snapshotResult.getCompletedAt() == null ? client.now() : snapshotResult.getCompletedAt();
         Generation generation = normalize(snapshotResult, completedAt, snapshotCallError);
 
+        SigilClient.stampContentCaptureMetadata(generation, contentCaptureMode);
+        if (contentCaptureMode == ContentCaptureMode.METADATA_ONLY) {
+            String errorCategory = SigilClient.errorCategoryFromThrowable(snapshotCallError, false);
+            SigilClient.stripContent(generation, errorCategory);
+        }
+
         if (span.getSpanContext().isValid()) {
             generation.setTraceId(span.getSpanContext().getTraceId());
             generation.setSpanId(span.getSpanContext().getSpanId());
@@ -99,10 +111,11 @@ public class GenerationRecorder implements AutoCloseable {
             }
         }
 
-        if (snapshotCallError != null) {
+        boolean isMetadataOnly = contentCaptureMode == ContentCaptureMode.METADATA_ONLY;
+        if (snapshotCallError != null && !isMetadataOnly) {
             span.recordException(snapshotCallError);
         }
-        if (localError != null) {
+        if (localError != null && !isMetadataOnly) {
             span.recordException(localError);
         }
 
@@ -113,19 +126,19 @@ public class GenerationRecorder implements AutoCloseable {
             errorCategory = SigilClient.errorCategoryFromThrowable(snapshotCallError, true);
             span.setAttribute(SigilClient.SPAN_ATTR_ERROR_TYPE, "provider_call_error");
             span.setAttribute(SigilClient.SPAN_ATTR_ERROR_CATEGORY, errorCategory);
-            span.setStatus(StatusCode.ERROR, String.valueOf(snapshotCallError.getMessage()));
+            span.setStatus(StatusCode.ERROR, isMetadataOnly ? errorCategory : String.valueOf(snapshotCallError.getMessage()));
         } else if (localError instanceof ValidationException) {
             errorType = "validation_error";
             errorCategory = "sdk_error";
             span.setAttribute(SigilClient.SPAN_ATTR_ERROR_TYPE, "validation_error");
             span.setAttribute(SigilClient.SPAN_ATTR_ERROR_CATEGORY, errorCategory);
-            span.setStatus(StatusCode.ERROR, String.valueOf(localError.getMessage()));
+            span.setStatus(StatusCode.ERROR, isMetadataOnly ? errorCategory : String.valueOf(localError.getMessage()));
         } else if (localError != null) {
             errorType = "enqueue_error";
             errorCategory = "sdk_error";
             span.setAttribute(SigilClient.SPAN_ATTR_ERROR_TYPE, "enqueue_error");
             span.setAttribute(SigilClient.SPAN_ATTR_ERROR_CATEGORY, errorCategory);
-            span.setStatus(StatusCode.ERROR, String.valueOf(localError.getMessage()));
+            span.setStatus(StatusCode.ERROR, isMetadataOnly ? errorCategory : String.valueOf(localError.getMessage()));
         } else {
             span.setStatus(StatusCode.OK);
         }
@@ -133,6 +146,10 @@ public class GenerationRecorder implements AutoCloseable {
         client.recordGenerationMetrics(generation, errorType, errorCategory, snapshotFirstTokenAt);
         span.end(completedAt.toEpochMilli(), TimeUnit.MILLISECONDS);
         client.recordGeneration(generation);
+
+        if (contentCaptureScope != null) {
+            contentCaptureScope.close();
+        }
 
         synchronized (lock) {
             finalError = localError;

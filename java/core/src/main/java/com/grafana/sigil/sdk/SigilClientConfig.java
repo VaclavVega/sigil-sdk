@@ -3,6 +3,8 @@ package com.grafana.sigil.sdk;
 import io.opentelemetry.api.metrics.Meter;
 import io.opentelemetry.api.trace.Tracer;
 import java.time.Clock;
+import java.util.Map;
+import java.util.function.Function;
 import java.util.logging.Logger;
 
 /** Top-level runtime configuration for {@link SigilClient}. */
@@ -10,6 +12,8 @@ public final class SigilClientConfig {
     private GenerationExportConfig generationExport = new GenerationExportConfig();
     private ApiConfig api = new ApiConfig();
     private EmbeddingCaptureConfig embeddingCapture = new EmbeddingCaptureConfig();
+    private ContentCaptureMode contentCapture = ContentCaptureMode.DEFAULT;
+    private Function<Map<String, Object>, ContentCaptureMode> contentCaptureResolver;
     private GenerationExporter generationExporter;
     private Tracer tracer;
     private Meter meter;
@@ -40,6 +44,24 @@ public final class SigilClientConfig {
 
     public SigilClientConfig setEmbeddingCapture(EmbeddingCaptureConfig embeddingCapture) {
         this.embeddingCapture = embeddingCapture == null ? new EmbeddingCaptureConfig() : embeddingCapture;
+        return this;
+    }
+
+    public ContentCaptureMode getContentCapture() {
+        return contentCapture;
+    }
+
+    public SigilClientConfig setContentCapture(ContentCaptureMode contentCapture) {
+        this.contentCapture = contentCapture == null ? ContentCaptureMode.DEFAULT : contentCapture;
+        return this;
+    }
+
+    public Function<Map<String, Object>, ContentCaptureMode> getContentCaptureResolver() {
+        return contentCaptureResolver;
+    }
+
+    public SigilClientConfig setContentCaptureResolver(Function<Map<String, Object>, ContentCaptureMode> contentCaptureResolver) {
+        this.contentCaptureResolver = contentCaptureResolver;
         return this;
     }
 
@@ -93,6 +115,8 @@ public final class SigilClientConfig {
                 .setGenerationExport(generationExport.copy())
                 .setApi(api.copy())
                 .setEmbeddingCapture(embeddingCapture.copy())
+                .setContentCapture(contentCapture)
+                .setContentCaptureResolver(contentCaptureResolver)
                 .setGenerationExporter(generationExporter)
                 .setTracer(tracer)
                 .setMeter(meter)

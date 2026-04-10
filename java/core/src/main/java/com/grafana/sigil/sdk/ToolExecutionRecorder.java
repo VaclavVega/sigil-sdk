@@ -12,6 +12,8 @@ public class ToolExecutionRecorder implements AutoCloseable {
     private final ToolExecutionStart seed;
     private final Span span;
     private final Instant startedAt;
+    private final boolean includeContent;
+    private final boolean metadataOnly;
 
     private final Object lock = new Object();
     private boolean ended;
@@ -19,11 +21,14 @@ public class ToolExecutionRecorder implements AutoCloseable {
     private ToolExecutionResult result;
     private Throwable finalError;
 
-    ToolExecutionRecorder(SigilClient client, ToolExecutionStart seed, Span span, Instant startedAt) {
+    ToolExecutionRecorder(SigilClient client, ToolExecutionStart seed, Span span, Instant startedAt,
+                          boolean includeContent, boolean metadataOnly) {
         this.client = client;
         this.seed = seed;
         this.span = span;
         this.startedAt = startedAt;
+        this.includeContent = includeContent;
+        this.metadataOnly = metadataOnly;
     }
 
     protected ToolExecutionRecorder() {
@@ -31,6 +36,8 @@ public class ToolExecutionRecorder implements AutoCloseable {
         this.seed = null;
         this.span = null;
         this.startedAt = null;
+        this.includeContent = false;
+        this.metadataOnly = false;
     }
 
     /** Sets tool execution arguments/result payload. */
@@ -74,14 +81,14 @@ public class ToolExecutionRecorder implements AutoCloseable {
                 .setConversationId(seed.getConversationId())
                 .setAgentName(seed.getAgentName())
                 .setAgentVersion(seed.getAgentVersion())
-                .setIncludeContent(seed.isIncludeContent())
+                .setIncludeContent(includeContent)
                 .setStartedAt(startedAt)
                 .setCompletedAt(completedAt)
                 .setArguments(snapshotResult.getArguments())
                 .setResult(snapshotResult.getResult())
                 .setCallError(snapshotCallError == null ? "" : String.valueOf(snapshotCallError.getMessage()));
 
-        if (seed.isIncludeContent()) {
+        if (includeContent) {
             try {
                 if (snapshotResult.getArguments() != null) {
                     span.setAttribute(SigilClient.SPAN_ATTR_TOOL_CALL_ARGUMENTS, Json.MAPPER.writeValueAsString(snapshotResult.getArguments()));
@@ -95,10 +102,13 @@ public class ToolExecutionRecorder implements AutoCloseable {
         }
 
         if (snapshotCallError != null) {
-            span.recordException(snapshotCallError);
+            String errorCategory = SigilClient.errorCategoryFromThrowable(snapshotCallError, true);
+            if (!metadataOnly) {
+                span.recordException(snapshotCallError);
+            }
             span.setAttribute(SigilClient.SPAN_ATTR_ERROR_TYPE, "tool_execution_error");
-            span.setAttribute(SigilClient.SPAN_ATTR_ERROR_CATEGORY, SigilClient.errorCategoryFromThrowable(snapshotCallError, true));
-            span.setStatus(StatusCode.ERROR, String.valueOf(snapshotCallError.getMessage()));
+            span.setAttribute(SigilClient.SPAN_ATTR_ERROR_CATEGORY, errorCategory);
+            span.setStatus(StatusCode.ERROR, metadataOnly ? errorCategory : String.valueOf(snapshotCallError.getMessage()));
         } else {
             span.setStatus(StatusCode.OK);
         }
