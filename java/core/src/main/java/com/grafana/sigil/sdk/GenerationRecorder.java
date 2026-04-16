@@ -79,81 +79,84 @@ public class GenerationRecorder implements AutoCloseable {
             snapshotFirstTokenAt = firstTokenAt;
         }
 
-        Instant completedAt = snapshotResult.getCompletedAt() == null ? client.now() : snapshotResult.getCompletedAt();
-        Generation generation = normalize(snapshotResult, completedAt, snapshotCallError);
-
-        SigilClient.stampContentCaptureMetadata(generation, contentCaptureMode);
-        if (contentCaptureMode == ContentCaptureMode.METADATA_ONLY) {
-            String errorCategory = SigilClient.errorCategoryFromThrowable(snapshotCallError, false);
-            SigilClient.stripContent(generation, errorCategory);
-        }
-
-        if (span.getSpanContext().isValid()) {
-            generation.setTraceId(span.getSpanContext().getTraceId());
-            generation.setSpanId(span.getSpanContext().getSpanId());
-        }
-
-        span.updateName(SigilClient.generationSpanName(generation.getOperationName(), generation.getModel().getName()));
-        SigilClient.setGenerationSpanAttributes(span, generation);
-
+        Generation generation;
         Throwable localError = null;
         try {
-            GenerationValidator.validate(generation);
-        } catch (Throwable throwable) {
-            localError = throwable;
-        }
+            Instant completedAt = snapshotResult.getCompletedAt() == null ? client.now() : snapshotResult.getCompletedAt();
+            generation = normalize(snapshotResult, completedAt, snapshotCallError);
 
-        if (localError == null) {
+            SigilClient.stampContentCaptureMetadata(generation, contentCaptureMode);
+            if (contentCaptureMode == ContentCaptureMode.METADATA_ONLY) {
+                String errorCategory = SigilClient.errorCategoryFromThrowable(snapshotCallError, false);
+                SigilClient.stripContent(generation, errorCategory);
+            }
+
+            if (span.getSpanContext().isValid()) {
+                generation.setTraceId(span.getSpanContext().getTraceId());
+                generation.setSpanId(span.getSpanContext().getSpanId());
+            }
+
+            span.updateName(SigilClient.generationSpanName(generation.getOperationName(), generation.getModel().getName()));
+            SigilClient.setGenerationSpanAttributes(span, generation);
+
             try {
-                client.enqueueGeneration(generation);
+                GenerationValidator.validate(generation);
             } catch (Throwable throwable) {
                 localError = throwable;
             }
-        }
 
-        boolean isMetadataOnly = contentCaptureMode == ContentCaptureMode.METADATA_ONLY;
-        if (snapshotCallError != null && !isMetadataOnly) {
-            span.recordException(snapshotCallError);
-        }
-        if (localError != null && !isMetadataOnly) {
-            span.recordException(localError);
-        }
+            if (localError == null) {
+                try {
+                    client.enqueueGeneration(generation);
+                } catch (Throwable throwable) {
+                    localError = throwable;
+                }
+            }
 
-        String errorType = "";
-        String errorCategory = "";
-        if (snapshotCallError != null) {
-            errorType = "provider_call_error";
-            errorCategory = SigilClient.errorCategoryFromThrowable(snapshotCallError, true);
-            span.setAttribute(SigilClient.SPAN_ATTR_ERROR_TYPE, "provider_call_error");
-            span.setAttribute(SigilClient.SPAN_ATTR_ERROR_CATEGORY, errorCategory);
-            span.setStatus(StatusCode.ERROR, isMetadataOnly ? errorCategory : String.valueOf(snapshotCallError.getMessage()));
-        } else if (localError instanceof ValidationException) {
-            errorType = "validation_error";
-            errorCategory = "sdk_error";
-            span.setAttribute(SigilClient.SPAN_ATTR_ERROR_TYPE, "validation_error");
-            span.setAttribute(SigilClient.SPAN_ATTR_ERROR_CATEGORY, errorCategory);
-            span.setStatus(StatusCode.ERROR, isMetadataOnly ? errorCategory : String.valueOf(localError.getMessage()));
-        } else if (localError != null) {
-            errorType = "enqueue_error";
-            errorCategory = "sdk_error";
-            span.setAttribute(SigilClient.SPAN_ATTR_ERROR_TYPE, "enqueue_error");
-            span.setAttribute(SigilClient.SPAN_ATTR_ERROR_CATEGORY, errorCategory);
-            span.setStatus(StatusCode.ERROR, isMetadataOnly ? errorCategory : String.valueOf(localError.getMessage()));
-        } else {
-            span.setStatus(StatusCode.OK);
-        }
+            boolean isMetadataOnly = contentCaptureMode == ContentCaptureMode.METADATA_ONLY;
+            if (snapshotCallError != null && !isMetadataOnly) {
+                span.recordException(snapshotCallError);
+            }
+            if (localError != null && !isMetadataOnly) {
+                span.recordException(localError);
+            }
 
-        client.recordGenerationMetrics(generation, errorType, errorCategory, snapshotFirstTokenAt);
-        span.end(completedAt.toEpochMilli(), TimeUnit.MILLISECONDS);
-        client.recordGeneration(generation);
+            String errorType = "";
+            String errorCategory = "";
+            if (snapshotCallError != null) {
+                errorType = "provider_call_error";
+                errorCategory = SigilClient.errorCategoryFromThrowable(snapshotCallError, true);
+                span.setAttribute(SigilClient.SPAN_ATTR_ERROR_TYPE, "provider_call_error");
+                span.setAttribute(SigilClient.SPAN_ATTR_ERROR_CATEGORY, errorCategory);
+                span.setStatus(StatusCode.ERROR, isMetadataOnly ? errorCategory : String.valueOf(snapshotCallError.getMessage()));
+            } else if (localError instanceof ValidationException) {
+                errorType = "validation_error";
+                errorCategory = "sdk_error";
+                span.setAttribute(SigilClient.SPAN_ATTR_ERROR_TYPE, "validation_error");
+                span.setAttribute(SigilClient.SPAN_ATTR_ERROR_CATEGORY, errorCategory);
+                span.setStatus(StatusCode.ERROR, isMetadataOnly ? errorCategory : String.valueOf(localError.getMessage()));
+            } else if (localError != null) {
+                errorType = "enqueue_error";
+                errorCategory = "sdk_error";
+                span.setAttribute(SigilClient.SPAN_ATTR_ERROR_TYPE, "enqueue_error");
+                span.setAttribute(SigilClient.SPAN_ATTR_ERROR_CATEGORY, errorCategory);
+                span.setStatus(StatusCode.ERROR, isMetadataOnly ? errorCategory : String.valueOf(localError.getMessage()));
+            } else {
+                span.setStatus(StatusCode.OK);
+            }
 
-        if (contentCaptureScope != null) {
-            contentCaptureScope.close();
-        }
+            client.recordGenerationMetrics(generation, errorType, errorCategory, snapshotFirstTokenAt);
+            span.end(completedAt.toEpochMilli(), TimeUnit.MILLISECONDS);
+            client.recordGeneration(generation);
 
-        synchronized (lock) {
-            finalError = localError;
-            lastGeneration = generation.copy();
+            synchronized (lock) {
+                finalError = localError;
+                lastGeneration = generation.copy();
+            }
+        } finally {
+            if (contentCaptureScope != null) {
+                contentCaptureScope.close();
+            }
         }
     }
 

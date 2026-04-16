@@ -321,26 +321,27 @@ public final class SigilClient implements AutoCloseable {
         seed.setStartedAt(startedAt);
 
         ContentCaptureMode resolverMode = callContentCaptureResolver(config.getContentCaptureResolver(), null);
-        ContentCaptureMode effectiveClientDefault = resolveContentCaptureMode(resolverMode, config.getContentCapture());
         ContentCaptureMode ctxMode = SigilContext.contentCaptureModeFromContext();
         boolean ctxSet = ctxMode != null;
+        ContentCaptureMode effectiveCtxMode = ctxSet ? ctxMode : ContentCaptureMode.DEFAULT;
         ContentCaptureMode resolvedToolMode = resolveToolContentCaptureMode(
                 seed.getContentCapture(),
-                ctxSet ? ctxMode : ContentCaptureMode.DEFAULT,
+                resolverMode,
+                effectiveCtxMode,
                 ctxSet,
-                effectiveClientDefault);
+                config.getContentCapture());
 
-        boolean includeContent;
+        @SuppressWarnings("deprecation")
+        boolean includeContent = shouldIncludeToolContent(
+                seed.getContentCapture(),
+                resolverMode,
+                effectiveCtxMode,
+                ctxSet,
+                config.getContentCapture(),
+                seed.isIncludeContent());
         boolean metadataOnly = resolvedToolMode == ContentCaptureMode.METADATA_ONLY;
         if (metadataOnly) {
             seed.setConversationTitle("");
-            includeContent = false;
-        } else if (resolvedToolMode == ContentCaptureMode.FULL) {
-            includeContent = true;
-        } else {
-            @SuppressWarnings("deprecation")
-            boolean legacy = seed.isIncludeContent();
-            includeContent = legacy;
         }
 
         Span span = tracer.spanBuilder(toolSpanName(seed.getToolName()))
@@ -1483,12 +1484,16 @@ public final class SigilClient implements AutoCloseable {
 
     static ContentCaptureMode resolveToolContentCaptureMode(
             ContentCaptureMode toolMode,
+            ContentCaptureMode resolverMode,
             ContentCaptureMode ctxMode,
             boolean ctxSet,
             ContentCaptureMode clientDefault) {
         ContentCaptureMode resolved = resolveClientContentCaptureMode(clientDefault);
         if (ctxSet) {
             resolved = ctxMode;
+        }
+        if (resolverMode != ContentCaptureMode.DEFAULT) {
+            resolved = resolverMode;
         }
         if (toolMode != ContentCaptureMode.DEFAULT) {
             resolved = toolMode;
@@ -1498,11 +1503,17 @@ public final class SigilClient implements AutoCloseable {
 
     static boolean shouldIncludeToolContent(
             ContentCaptureMode toolMode,
+            ContentCaptureMode resolverMode,
             ContentCaptureMode ctxMode,
             boolean ctxSet,
             ContentCaptureMode clientDefault,
             boolean legacyInclude) {
-        ContentCaptureMode resolved = resolveToolContentCaptureMode(toolMode, ctxMode, ctxSet, clientDefault);
+        ContentCaptureMode resolved = resolveToolContentCaptureMode(
+                toolMode,
+                resolverMode,
+                ctxMode,
+                ctxSet,
+                clientDefault);
         return switch (resolved) {
             case METADATA_ONLY -> false;
             case FULL -> true;

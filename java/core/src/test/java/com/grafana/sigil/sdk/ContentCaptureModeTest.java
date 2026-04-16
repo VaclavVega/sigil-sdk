@@ -1,6 +1,7 @@
 package com.grafana.sigil.sdk;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.trace.StatusCode;
@@ -9,6 +10,7 @@ import io.opentelemetry.sdk.testing.exporter.InMemorySpanExporter;
 import io.opentelemetry.sdk.trace.SdkTracerProvider;
 import io.opentelemetry.sdk.trace.data.SpanData;
 import io.opentelemetry.sdk.trace.export.SimpleSpanProcessor;
+import java.lang.reflect.Field;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -105,44 +107,51 @@ class ContentCaptureModeTest {
     @Test
     void shouldIncludeToolContent_clientFull_alwaysIncludes() {
         assertThat(SigilClient.shouldIncludeToolContent(
-                ContentCaptureMode.DEFAULT, ContentCaptureMode.DEFAULT, false,
+                ContentCaptureMode.DEFAULT, ContentCaptureMode.DEFAULT, ContentCaptureMode.DEFAULT, false,
                 ContentCaptureMode.FULL, false)).isTrue();
         assertThat(SigilClient.shouldIncludeToolContent(
-                ContentCaptureMode.DEFAULT, ContentCaptureMode.DEFAULT, false,
+                ContentCaptureMode.DEFAULT, ContentCaptureMode.DEFAULT, ContentCaptureMode.DEFAULT, false,
                 ContentCaptureMode.FULL, true)).isTrue();
     }
 
     @Test
     void shouldIncludeToolContent_clientDefault_legacyControls() {
         assertThat(SigilClient.shouldIncludeToolContent(
-                ContentCaptureMode.DEFAULT, ContentCaptureMode.DEFAULT, false,
+                ContentCaptureMode.DEFAULT, ContentCaptureMode.DEFAULT, ContentCaptureMode.DEFAULT, false,
                 ContentCaptureMode.DEFAULT, false)).isFalse();
         assertThat(SigilClient.shouldIncludeToolContent(
-                ContentCaptureMode.DEFAULT, ContentCaptureMode.DEFAULT, false,
+                ContentCaptureMode.DEFAULT, ContentCaptureMode.DEFAULT, ContentCaptureMode.DEFAULT, false,
                 ContentCaptureMode.DEFAULT, true)).isTrue();
     }
 
     @Test
     void shouldIncludeToolContent_ctxMetadataOnly_suppresses() {
         assertThat(SigilClient.shouldIncludeToolContent(
-                ContentCaptureMode.DEFAULT, ContentCaptureMode.METADATA_ONLY, true,
+                ContentCaptureMode.DEFAULT, ContentCaptureMode.DEFAULT, ContentCaptureMode.METADATA_ONLY, true,
                 ContentCaptureMode.FULL, true)).isFalse();
     }
 
     @Test
     void shouldIncludeToolContent_ctxFull_overridesClient() {
         assertThat(SigilClient.shouldIncludeToolContent(
-                ContentCaptureMode.DEFAULT, ContentCaptureMode.FULL, true,
+                ContentCaptureMode.DEFAULT, ContentCaptureMode.DEFAULT, ContentCaptureMode.FULL, true,
                 ContentCaptureMode.METADATA_ONLY, true)).isTrue();
     }
 
     @Test
     void shouldIncludeToolContent_explicitToolOverridesCtx() {
         assertThat(SigilClient.shouldIncludeToolContent(
-                ContentCaptureMode.FULL, ContentCaptureMode.METADATA_ONLY, true,
+                ContentCaptureMode.FULL, ContentCaptureMode.DEFAULT, ContentCaptureMode.METADATA_ONLY, true,
                 ContentCaptureMode.FULL, false)).isTrue();
         assertThat(SigilClient.shouldIncludeToolContent(
-                ContentCaptureMode.METADATA_ONLY, ContentCaptureMode.FULL, true,
+                ContentCaptureMode.METADATA_ONLY, ContentCaptureMode.DEFAULT, ContentCaptureMode.FULL, true,
+                ContentCaptureMode.FULL, true)).isFalse();
+    }
+
+    @Test
+    void shouldIncludeToolContent_resolverOverridesContext() {
+        assertThat(SigilClient.shouldIncludeToolContent(
+                ContentCaptureMode.DEFAULT, ContentCaptureMode.METADATA_ONLY, ContentCaptureMode.FULL, true,
                 ContentCaptureMode.FULL, true)).isFalse();
     }
 
@@ -534,6 +543,30 @@ class ContentCaptureModeTest {
         assertThat(toolSpan.getAttributes().get(AttributeKey.stringKey(SigilClient.SPAN_ATTR_TOOL_CALL_ARGUMENTS))).isNull();
     }
 
+    @Test
+    void tool_resolverMetadataOnly_overridesParentFull() {
+        InMemorySpanExporter spanExporter = InMemorySpanExporter.create();
+        Function<Map<String, Object>, ContentCaptureMode> resolver = meta -> ContentCaptureMode.METADATA_ONLY;
+        try (SigilClient client = newSpanTestClient(ContentCaptureMode.DEFAULT, resolver, spanExporter)) {
+            GenerationRecorder genRec = client.startGeneration(new GenerationStart()
+                    .setModel(new ModelRef().setProvider("anthropic").setName("claude-sonnet-4-5"))
+                    .setContentCapture(ContentCaptureMode.FULL));
+
+            @SuppressWarnings("deprecation")
+            ToolExecutionRecorder toolRec = client.startToolExecution(new ToolExecutionStart()
+                    .setToolName("test_tool")
+                    .setIncludeContent(true));
+            toolRec.setResult(new ToolExecutionResult().setArguments("args").setResult("result"));
+            toolRec.end();
+
+            genRec.setResult(minimalResult());
+            genRec.end();
+        }
+
+        SpanData toolSpan = findToolSpan(spanExporter.getFinishedSpanItems());
+        assertThat(toolSpan.getAttributes().get(AttributeKey.stringKey(SigilClient.SPAN_ATTR_TOOL_CALL_ARGUMENTS))).isNull();
+    }
+
     // --- Validation accepts stripped payloads ---
 
     @Test
@@ -670,6 +703,21 @@ class ContentCaptureModeTest {
         try (Scope scope = SigilContext.withContentCaptureMode(ContentCaptureMode.METADATA_ONLY)) {
             assertThat(SigilContext.contentCaptureModeFromContext())
                     .isEqualTo(ContentCaptureMode.METADATA_ONLY);
+        }
+        assertThat(SigilContext.contentCaptureModeFromContext()).isNull();
+    }
+
+    @Test
+    void generation_endFailure_restoresContentCaptureContext() throws Exception {
+        try (SigilClient client = newTestClient(ContentCaptureMode.FULL, null)) {
+            GenerationRecorder recorder = client.startGeneration(new GenerationStart()
+                    .setModel(new ModelRef().setProvider("anthropic").setName("claude-sonnet-4-5")));
+            assertThat(SigilContext.contentCaptureModeFromContext()).isEqualTo(ContentCaptureMode.FULL);
+
+            corruptRecorderSeedModel(recorder);
+
+            assertThatThrownBy(recorder::end).isInstanceOf(NullPointerException.class);
+            assertThat(SigilContext.contentCaptureModeFromContext()).isNull();
         }
         assertThat(SigilContext.contentCaptureModeFromContext()).isNull();
     }
@@ -934,5 +982,15 @@ class ContentCaptureModeTest {
             }
         }
         return null;
+    }
+
+    private static void corruptRecorderSeedModel(GenerationRecorder recorder) throws Exception {
+        Field seedField = GenerationRecorder.class.getDeclaredField("seed");
+        seedField.setAccessible(true);
+
+        GenerationStart seed = (GenerationStart) seedField.get(recorder);
+        Field modelField = GenerationStart.class.getDeclaredField("model");
+        modelField.setAccessible(true);
+        modelField.set(seed, null);
     }
 }
