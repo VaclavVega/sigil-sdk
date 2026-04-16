@@ -242,13 +242,18 @@ public sealed class SigilClient : IAsyncDisposable
             ApplyToolSpanAttributes(activity, seed);
         }
 
-        // Resolve content capture: per-tool > context (parent generation) > resolver > client default.
+        // Resolve content capture: per-tool > resolver > context (parent generation) > client default.
         var resolverMode = CallContentCaptureResolver(_config.ContentCaptureResolver, null, _log);
-        var effectiveClientDefault = ResolveContentCaptureMode(resolverMode, _config.ContentCapture);
         var ctxMode = SigilContext.ContentCaptureModeFromContext();
         var ctxSet = SigilContext.HasContentCaptureModeInContext();
 #pragma warning disable CS0618 // IncludeContent is obsolete
-        var includeContent = ShouldIncludeToolContent(seed.ContentCapture, ctxMode, ctxSet, effectiveClientDefault, seed.IncludeContent);
+        var includeContent = ShouldIncludeToolContent(
+            seed.ContentCapture,
+            resolverMode,
+            ctxMode,
+            ctxSet,
+            _config.ContentCapture,
+            seed.IncludeContent);
 #pragma warning restore CS0618
         return new ToolExecutionRecorder(this, seed, seed.StartedAt!.Value, includeContent, activity);
     }
@@ -1866,6 +1871,7 @@ public sealed class SigilClient : IAsyncDisposable
 
     internal static bool ShouldIncludeToolContent(
         ContentCaptureMode toolMode,
+        ContentCaptureMode resolverMode,
         ContentCaptureMode ctxMode,
         bool ctxSet,
         ContentCaptureMode clientDefault,
@@ -1875,6 +1881,10 @@ public sealed class SigilClient : IAsyncDisposable
         if (ctxSet)
         {
             resolved = ctxMode;
+        }
+        if (resolverMode != ContentCaptureMode.Default)
+        {
+            resolved = resolverMode;
         }
         if (toolMode != ContentCaptureMode.Default)
         {

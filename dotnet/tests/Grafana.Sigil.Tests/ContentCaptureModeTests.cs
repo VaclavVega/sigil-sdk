@@ -405,6 +405,7 @@ public sealed class ContentCaptureModeTests
         var got = SigilClient.ShouldIncludeToolContent(
             ContentCaptureMode.Default,
             ContentCaptureMode.Default,
+            ContentCaptureMode.Default,
             ctxSet,
             clientDefault,
             legacyInclude);
@@ -424,9 +425,29 @@ public sealed class ContentCaptureModeTests
     {
         var got = SigilClient.ShouldIncludeToolContent(
             ContentCaptureMode.Default,
+            ContentCaptureMode.Default,
             ctxMode,
             ctxSet,
             ContentCaptureMode.Full,
+            legacyInclude);
+        Assert.Equal(wantContent, got);
+    }
+
+    [Theory]
+    [InlineData(ContentCaptureMode.MetadataOnly, ContentCaptureMode.Full, true, false)]
+    [InlineData(ContentCaptureMode.Full, ContentCaptureMode.MetadataOnly, false, true)]
+    public void ShouldIncludeToolContent_ResolverOverridesContext(
+        ContentCaptureMode resolverMode,
+        ContentCaptureMode ctxMode,
+        bool legacyInclude,
+        bool wantContent)
+    {
+        var got = SigilClient.ShouldIncludeToolContent(
+            ContentCaptureMode.Default,
+            resolverMode,
+            ctxMode,
+            true,
+            ContentCaptureMode.Default,
             legacyInclude);
         Assert.Equal(wantContent, got);
     }
@@ -442,6 +463,7 @@ public sealed class ContentCaptureModeTests
     {
         var got = SigilClient.ShouldIncludeToolContent(
             toolMode,
+            ContentCaptureMode.Default,
             ctxMode,
             true,
             ContentCaptureMode.Full,
