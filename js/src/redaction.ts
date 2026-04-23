@@ -1,5 +1,4 @@
 import type { GenerationSanitizer, Message, MessagePart } from './types.js';
-import { cloneGeneration } from './utils.js';
 
 /**
  * Secret redaction engine for Sigil content capture.
@@ -101,19 +100,17 @@ export function createSecretRedactionSanitizer(options: SecretRedactionOptions =
   const redactInputMessages = options.redactInputMessages ?? false;
 
   return (generation) => {
-    const sanitized = cloneGeneration(generation);
-
-    if (sanitized.systemPrompt !== undefined) {
-      sanitized.systemPrompt = redactor.redactLightweight(sanitized.systemPrompt);
+    if (generation.systemPrompt !== undefined) {
+      generation.systemPrompt = redactor.redactLightweight(generation.systemPrompt);
     }
-    if (sanitized.conversationTitle !== undefined) {
-      sanitized.conversationTitle = redactor.redactLightweight(sanitized.conversationTitle);
+    if (generation.conversationTitle !== undefined) {
+      generation.conversationTitle = redactor.redactLightweight(generation.conversationTitle);
     }
-    if (sanitized.callError !== undefined) {
-      sanitized.callError = redactor.redactLightweight(sanitized.callError);
+    if (generation.callError !== undefined) {
+      generation.callError = redactor.redactLightweight(generation.callError);
     }
 
-    for (const message of sanitized.input ?? []) {
+    for (const message of generation.input ?? []) {
       sanitizeMessage(
         message,
         redactor,
@@ -128,7 +125,7 @@ export function createSecretRedactionSanitizer(options: SecretRedactionOptions =
               : 'none',
       );
     }
-    for (const message of sanitized.output ?? []) {
+    for (const message of generation.output ?? []) {
       sanitizeMessage(
         message,
         redactor,
@@ -136,7 +133,7 @@ export function createSecretRedactionSanitizer(options: SecretRedactionOptions =
       );
     }
 
-    return sanitized;
+    return generation;
   };
 }
 
