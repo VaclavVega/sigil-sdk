@@ -129,7 +129,9 @@ function resolveOtlp(file: Record<string, unknown>): OtlpConfig | undefined {
     const encoded = Buffer.from(`${basicUser}:${basicPassword}`).toString(
       "base64",
     );
-    headers.Authorization = `Basic ${encoded}`;
+    if (!headers.Authorization) {
+      headers.Authorization = `Basic ${encoded}`;
+    }
   }
 
   const bearerToken = resolveEnvVars(

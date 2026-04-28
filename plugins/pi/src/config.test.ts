@@ -267,6 +267,19 @@ describe("resolveConfig otlp", () => {
     expect(cfg?.otlp?.headers["X-Custom"]).toBe("value");
   });
 
+  it("preserves explicit otlp authorization header over basic auth shorthand", () => {
+    const cfg = resolveConfig({
+      endpoint: "http://localhost:8080/api/v1/generations:export",
+      otlp: {
+        endpoint: "https://otlp.example.com",
+        headers: { Authorization: "Bearer explicit-token" },
+        basicUser: "user",
+        basicPassword: "pass",
+      },
+    });
+    expect(cfg?.otlp?.headers.Authorization).toBe("Bearer explicit-token");
+  });
+
   it("env vars override otlp config", () => {
     process.env.SIGIL_PI_OTLP_ENDPOINT = "https://env-otlp.example.com";
     process.env.SIGIL_PI_OTLP_BASIC_USER = "env-user";
