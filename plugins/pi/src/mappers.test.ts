@@ -157,16 +157,44 @@ describe("mapGenerationResult", () => {
     expect(result.usage?.totalTokens).toBe(380);
   });
 
-  it("metadata_only produces no output", () => {
+  it("metadata_only preserves tool call structure with stripped content", () => {
     const result = mapGenerationResult(
-      makeMsg(),
-      [makeToolResult()],
+      makeMsg({
+        content: [
+          { type: "text", text: "I'll run that command" },
+          {
+            type: "toolCall",
+            id: "c1",
+            name: "bash",
+            arguments: { command: "ls" },
+          },
+        ],
+      }),
+      [makeToolResult({ toolCallId: "c1" })],
       "metadata_only",
     );
-    expect(result.output).toBeUndefined();
+
+    expect(result.output).toHaveLength(2);
+    expect(result.output?.[0]).toEqual({
+      role: "assistant",
+      parts: [{ type: "text", text: "I'll run that command" }],
+    });
+    expect(result.output?.[1]).toEqual({
+      role: "assistant",
+      parts: [
+        {
+          type: "tool_call",
+          toolCall: {
+            id: "c1",
+            name: "bash",
+            inputJSON: "",
+          },
+        },
+      ],
+    });
   });
 
-  it("no_tool_content emits assistant text/thinking but skips tool blocks", () => {
+  it("no_tool_content emits tool calls but strips their arguments", () => {
     const msg = makeMsg({
       content: [
         { type: "text", text: "I'll run that command" },
@@ -187,14 +215,26 @@ describe("mapGenerationResult", () => {
     ];
     const result = mapGenerationResult(msg, toolResults, "no_tool_content");
 
-    // Only assistant text + thinking (2 messages), no tool_call or tool_result.
-    expect(result.output).toHaveLength(2);
+    expect(result.output).toHaveLength(3);
     const partTypes = result.output?.flatMap((m) =>
       m.parts?.map((p) => p.type),
     );
     expect(partTypes).toContain("text");
     expect(partTypes).toContain("thinking");
-    expect(partTypes).not.toContain("tool_call");
+    expect(partTypes).toContain("tool_call");
+    expect(result.output?.[2]).toEqual({
+      role: "assistant",
+      parts: [
+        {
+          type: "tool_call",
+          toolCall: {
+            id: "c1",
+            name: "bash",
+            inputJSON: "",
+          },
+        },
+      ],
+    });
     expect(result.output?.some((m) => m.role === "tool")).toBe(false);
   });
 

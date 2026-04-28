@@ -109,15 +109,13 @@ export function mapGenerationResult(
     },
   };
 
-  if (contentCapture !== "metadata_only") {
-    const includeTools = contentCapture === "full";
-    const output: Message[] = mapAssistantOutput(msg, includeTools);
-    if (includeTools) {
-      output.push(...mapToolResultsOutput(toolResults));
-    }
-    if (output.length > 0) {
-      result.output = output;
-    }
+  const includeToolContent = contentCapture === "full";
+  const output: Message[] = mapAssistantOutput(msg, includeToolContent);
+  if (includeToolContent) {
+    output.push(...mapToolResultsOutput(toolResults));
+  }
+  if (output.length > 0) {
+    result.output = output;
   }
 
   return result;
@@ -138,7 +136,7 @@ export function mapToolNames(toolTimings: ToolTiming[]): ToolDefinition[] {
 
 /**
  * Map assistant message content blocks to Sigil output messages.
- * Tool-call blocks are only emitted when `includeTools` is true (i.e. `full` mode).
+ * Tool-call structure is always preserved, but arguments are only included in `full` mode.
  */
 function mapAssistantOutput(
   msg: PiAssistantMessage,
@@ -168,7 +166,6 @@ function mapAssistantOutput(
         break;
       }
       case "toolCall": {
-        if (!includeTools) break;
         messages.push({
           role: "assistant",
           parts: [
@@ -177,7 +174,7 @@ function mapAssistantOutput(
               toolCall: {
                 id: block.id,
                 name: block.name,
-                inputJSON: JSON.stringify(block.arguments),
+                inputJSON: includeTools ? JSON.stringify(block.arguments) : "",
               },
             },
           ],
