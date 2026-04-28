@@ -62,6 +62,22 @@ describe("resolveConfig", () => {
     );
   });
 
+  it("extends an api base endpoint to the export path", () => {
+    const cfg = resolveConfig({ endpoint: "http://localhost:8080/api/v1" });
+    expect(cfg?.endpoint).toBe(
+      "http://localhost:8080/api/v1/generations:export",
+    );
+  });
+
+  it("does not double-append export path before a query string", () => {
+    const cfg = resolveConfig({
+      endpoint: "http://localhost:8080/api/v1/generations:export/?foo=bar",
+    });
+    expect(cfg?.endpoint).toBe(
+      "http://localhost:8080/api/v1/generations:export?foo=bar",
+    );
+  });
+
   it("defaults contentCapture to metadata_only", () => {
     const cfg = resolveConfig({
       endpoint: "http://localhost:8080/api/v1/generations:export",

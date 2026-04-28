@@ -47,15 +47,14 @@ export function resolveConfig(
   file: Record<string, unknown>,
 ): SigilPiConfig | null {
   const EXPORT_PATH = "/api/v1/generations:export";
+  const API_BASE_PATH = "/api/v1";
   let endpoint = (
     env("SIGIL_PI_ENDPOINT") ??
     asString(file.endpoint) ??
     ""
   ).trim();
   if (!endpoint) return null;
-  if (!endpoint.includes(EXPORT_PATH)) {
-    endpoint = endpoint.replace(/\/+$/, "") + EXPORT_PATH;
-  }
+  endpoint = resolveExportEndpoint(endpoint, EXPORT_PATH, API_BASE_PATH);
 
   const auth = resolveAuth(file);
   if (!auth) return null;
@@ -90,6 +89,28 @@ export function resolveConfig(
     debug,
     otlp,
   };
+}
+
+function resolveExportEndpoint(
+  endpoint: string,
+  exportPath: string,
+  apiBasePath: string,
+): string {
+  const suffixIndex = endpoint.search(/[?#]/);
+  const suffix = suffixIndex >= 0 ? endpoint.slice(suffixIndex) : "";
+  const base = (
+    suffixIndex >= 0 ? endpoint.slice(0, suffixIndex) : endpoint
+  ).replace(/\/+$/, "");
+
+  if (base.endsWith(exportPath)) {
+    return base + suffix;
+  }
+
+  if (base.endsWith(apiBasePath)) {
+    return `${base}/generations:export${suffix}`;
+  }
+
+  return `${base}${exportPath}${suffix}`;
 }
 
 function resolveOtlp(file: Record<string, unknown>): OtlpConfig | undefined {
