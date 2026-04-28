@@ -136,6 +136,29 @@ describe("mapGenerationResult", () => {
     expect(result.metadata?.cost_usd).toBe(0.012);
   });
 
+  it("keeps exporting when usage cost is missing", () => {
+    const msg = makeMsg({
+      usage: {
+        input: 100,
+        output: 50,
+        cacheRead: 10,
+        cacheWrite: 5,
+        totalTokens: 165,
+      } as PiAssistantMessage["usage"],
+    });
+
+    const result = mapGenerationResult(msg, [], "metadata_only");
+
+    expect(result.usage).toEqual({
+      inputTokens: 100,
+      outputTokens: 50,
+      totalTokens: 165,
+      cacheReadInputTokens: 10,
+      cacheCreationInputTokens: 5,
+    });
+    expect(result.metadata).toBeUndefined();
+  });
+
   it("uses provider-reported totalTokens (includes cache)", () => {
     const msg = makeMsg({
       usage: {
@@ -207,7 +230,7 @@ describe("mapGenerationResult", () => {
     ).toBe("");
   });
 
-  it("no_tool_content emits text/thinking + structural tool parts with empty bodies", () => {
+  it("no_tool_content emits text/thinking + structural tool parts with tool content for SDK stripping", () => {
     const msg = makeMsg({
       content: [
         { type: "text", text: "I'll run that command" },
@@ -243,7 +266,7 @@ describe("mapGenerationResult", () => {
       .find((p) => p.type === "tool_call");
     expect(
       (toolCallPart as { toolCall: { inputJSON: string } }).toolCall.inputJSON,
-    ).toBe("");
+    ).toBe('{"command":"ls"}');
 
     const toolResultPart = result.output
       ?.flatMap((m) => m.parts ?? [])
@@ -251,7 +274,7 @@ describe("mapGenerationResult", () => {
     expect(
       (toolResultPart as { toolResult: { content: string } }).toolResult
         .content,
-    ).toBe("");
+    ).toBe("file.txt");
   });
 
   it("full mode emits assistant text, tool_call, and tool_result", () => {

@@ -83,6 +83,9 @@ jobs:
       - name: Test pi plugin
         run: pnpm --filter pi-sigil run test
 
+      - name: Build pi plugin
+        run: mise run build:ts:plugin-pi
+
   python-lint:
     name: Python Lint
     runs-on: ubuntu-latest

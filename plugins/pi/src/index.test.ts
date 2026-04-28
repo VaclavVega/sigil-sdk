@@ -18,7 +18,7 @@ vi.mock("./client.js", () => ({
 }));
 
 import type { SigilClient } from "@grafana/sigil-sdk-js";
-import registerExtension, { emitToolSpans } from "./index.js";
+import registerExtension, { detectPiVersion, emitToolSpans } from "./index.js";
 import type {
   PiAssistantMessage,
   PiToolResult,
@@ -84,6 +84,35 @@ function assistantMessage() {
     timestamp: Date.now(),
   };
 }
+
+describe("detectPiVersion", () => {
+  it("falls back to node_modules lookup when resolve returns a promise", () => {
+    const version = detectPiVersion({
+      resolve: () => Promise.resolve("file:///ignored-by-sync-path.js"),
+      moduleURL: "file:///workspace/plugins/pi/src/index.ts",
+      readFile: ((path: string) => {
+        if (
+          path ===
+          "/workspace/plugins/pi/src/node_modules/@mariozechner/pi-coding-agent/package.json"
+        ) {
+          throw new Error("not here");
+        }
+        if (
+          path ===
+          "/workspace/plugins/pi/node_modules/@mariozechner/pi-coding-agent/package.json"
+        ) {
+          return JSON.stringify({
+            name: "@mariozechner/pi-coding-agent",
+            version: "0.70.5",
+          });
+        }
+        throw new Error(`unexpected path: ${path}`);
+      }) as typeof import("node:fs").readFileSync,
+    });
+
+    expect(version).toBe("0.70.5");
+  });
+});
 
 describe("extension lifecycle", () => {
   beforeEach(() => {
@@ -318,6 +347,53 @@ describe("extension lifecycle", () => {
     );
     warn.mockRestore();
   });
+
+  it("still exports a generation when usage.cost is missing", async () => {
+    const recorder = {
+      setResult: vi.fn(),
+      setCallError: vi.fn(),
+    };
+
+    const sigil: SigilLike = {
+      startGeneration: vi.fn(async (_seed, run) => {
+        await run(recorder);
+      }),
+      startToolExecution: vi.fn(() => ({
+        setResult: vi.fn(),
+        setCallError: vi.fn(),
+        end: vi.fn(),
+        getError: vi.fn(),
+      })),
+      shutdown: vi.fn(async () => {}),
+    };
+
+    loadConfigMock.mockResolvedValue({
+      endpoint: "http://localhost:8080/api/v1/generations:export",
+      auth: { mode: "none" },
+      agentName: "pi",
+      contentCapture: "metadata_only",
+    });
+    createSigilClientMock.mockReturnValue(sigil);
+
+    const pi = new FakePi();
+    registerExtension(pi as any);
+
+    await pi.emit("session_start");
+    await pi.emit("turn_start");
+    const msg = assistantMessage();
+    (msg as any).usage = {
+      input: 10,
+      output: 20,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 30,
+    };
+
+    await pi.emit("turn_end", { message: msg, toolResults: [] });
+
+    expect(sigil.startGeneration).toHaveBeenCalledTimes(1);
+    expect(recorder.setResult).toHaveBeenCalledTimes(1);
+  });
 });
 
 // --- Unit tests for emitToolSpans ---
@@ -497,6 +573,35 @@ describe("emitToolSpans", () => {
       {
         agentName: "pi",
         contentCapture: "full",
+      },
+    );
+
+    expect(recorders[0]!.result?.arguments).toBe('{"cmd":"ls"}');
+    expect(recorders[0]!.result?.result).toBe("file.txt");
+  });
+
+  it("includes tool content in no_tool_content mode for SDK filtering", () => {
+    const { client, recorders } = mockSigilClient();
+    const msg = makePiMsg({
+      content: [
+        { type: "toolCall", id: "c1", name: "bash", arguments: { cmd: "ls" } },
+      ],
+    });
+    const toolResults = [
+      makePiToolResult({
+        toolCallId: "c1",
+        content: [{ type: "text", text: "file.txt" }],
+      }),
+    ];
+
+    emitToolSpans(
+      client,
+      msg,
+      toolResults,
+      [makePiTiming({ toolCallId: "c1" })],
+      {
+        agentName: "pi",
+        contentCapture: "no_tool_content",
       },
     );
 

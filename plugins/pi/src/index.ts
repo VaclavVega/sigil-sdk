@@ -19,29 +19,103 @@ import {
   type TelemetryProviders,
 } from "./telemetry.js";
 
-function detectPiVersion(): string | undefined {
-  try {
-    // Resolve an exported subpath via ESM resolution, then walk up to package.json.
-    // createRequire won't work here: pi's package.json uses "import"-only exports.
-    const resolved = import.meta.resolve("@mariozechner/pi-coding-agent/hooks");
-    let dir = dirname(fileURLToPath(resolved));
-    for (let i = 0; i < 5; i++) {
-      try {
-        const pkgPath = join(dir, "package.json");
-        const pkg = JSON.parse(readFileSync(pkgPath, "utf-8")) as {
-          name?: string;
-          version?: string;
-        };
-        if (pkg.name === "@mariozechner/pi-coding-agent") return pkg.version;
-      } catch {
-        // no package.json at this level, keep walking
+const piPackageName = "@mariozechner/pi-coding-agent";
+const piHooksSpecifier = `${piPackageName}/hooks`;
+
+type PiPackageResolver = (specifier: string) => string | Promise<string>;
+
+interface DetectPiVersionOptions {
+  resolve?: PiPackageResolver;
+  moduleURL?: string;
+  readFile?: typeof readFileSync;
+}
+
+/** @internal Exported for testing. */
+export function detectPiVersion(
+  options: DetectPiVersionOptions = {},
+): string | undefined {
+  const readFile = options.readFile ?? readFileSync;
+  const resolve =
+    options.resolve ??
+    (
+      import.meta as ImportMeta & {
+        resolve?: PiPackageResolver;
       }
-      dir = dirname(dir);
+    ).resolve;
+
+  try {
+    // Prefer ESM resolution when available, but fall back to searching ancestor
+    // node_modules so older/loader-specific runtimes still report a version.
+    if (typeof resolve === "function") {
+      try {
+        const resolved = resolve(piHooksSpecifier);
+        if (typeof resolved === "string") {
+          const version = findPackageVersionUpwards(
+            dirname(fileURLToPath(resolved)),
+            readFile,
+          );
+          if (version) return version;
+        }
+      } catch {
+        // Ignore resolution failures and try node_modules lookup below.
+      }
     }
-    return undefined;
+
+    return findPackageVersionInNodeModules(
+      dirname(fileURLToPath(options.moduleURL ?? import.meta.url)),
+      readFile,
+    );
   } catch {
     return undefined;
   }
+}
+
+function findPackageVersionUpwards(
+  startDir: string,
+  readFile: typeof readFileSync,
+): string | undefined {
+  let dir = startDir;
+  for (let i = 0; i < 5; i++) {
+    const version = readPackageVersion(join(dir, "package.json"), readFile);
+    if (version) return version;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return undefined;
+}
+
+function findPackageVersionInNodeModules(
+  startDir: string,
+  readFile: typeof readFileSync,
+): string | undefined {
+  let dir = startDir;
+  while (true) {
+    const version = readPackageVersion(
+      join(dir, "node_modules", piPackageName, "package.json"),
+      readFile,
+    );
+    if (version) return version;
+    const parent = dirname(dir);
+    if (parent === dir) return undefined;
+    dir = parent;
+  }
+}
+
+function readPackageVersion(
+  pkgPath: string,
+  readFile: typeof readFileSync,
+): string | undefined {
+  try {
+    const pkg = JSON.parse(readFile(pkgPath, "utf-8")) as {
+      name?: string;
+      version?: string;
+    };
+    if (pkg.name === piPackageName) return pkg.version;
+  } catch {
+    // keep searching
+  }
+  return undefined;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -257,7 +331,7 @@ export function emitToolSpans(
 ): void {
   if (timings.length === 0) return;
 
-  const includeContent = opts.contentCapture === "full";
+  const includeContent = opts.contentCapture !== "metadata_only";
 
   const argsMap = new Map<string, Record<string, unknown>>();
   const resultMap = new Map<string, string>();

@@ -92,6 +92,7 @@ export function mapGenerationResult(
   toolResults: PiToolResult[],
   contentCapture: ContentCaptureMode,
 ): GenerationResult {
+  const totalCost = msg.usage.cost?.total;
   const result: GenerationResult = {
     responseId: msg.responseId,
     responseModel: msg.model,
@@ -104,9 +105,13 @@ export function mapGenerationResult(
     },
     stopReason: mapStopReason(msg.stopReason),
     completedAt: new Date(msg.timestamp),
-    metadata: {
-      cost_usd: msg.usage.cost.total,
-    },
+    ...(typeof totalCost === "number"
+      ? {
+          metadata: {
+            cost_usd: totalCost,
+          },
+        }
+      : {}),
   };
 
   // Always emit structural tool_call / tool_result parts so the SDK can count
@@ -141,7 +146,8 @@ export function mapToolNames(toolTimings: ToolTiming[]): ToolDefinition[] {
  * Map assistant message content blocks to Sigil output messages.
  * - text/thinking parts: only when contentCapture allows body content.
  * - tool_call parts: always emitted (structure needed for the SDK's
- *   tool_calls_per_operation metric); inputJSON is only filled in `full` mode.
+ *   tool_calls_per_operation metric); inputJSON is filled whenever generation
+ *   content is captured so the SDK can apply its own stripping rules.
  */
 function mapAssistantOutput(
   msg: PiAssistantMessage,
@@ -180,10 +186,7 @@ function mapAssistantOutput(
               toolCall: {
                 id: block.id,
                 name: block.name,
-                inputJSON:
-                  contentCapture === "full"
-                    ? JSON.stringify(block.arguments)
-                    : "",
+                inputJSON: includeBodies ? JSON.stringify(block.arguments) : "",
               },
             },
           ],
@@ -198,14 +201,15 @@ function mapAssistantOutput(
 
 /**
  * Map pi tool results to Sigil tool result messages. Always emits the
- * structural part; body content is included only in `full` mode.
+ * structural part; body content is included whenever generation content is
+ * captured so the SDK can apply its own stripping rules.
  */
 function mapToolResultsOutput(
   toolResults: PiToolResult[],
   contentCapture: ContentCaptureMode,
 ): Message[] {
   const messages: Message[] = [];
-  const includeBody = contentCapture === "full";
+  const includeBody = contentCapture !== "metadata_only";
 
   for (const tr of toolResults) {
     let content = "";
