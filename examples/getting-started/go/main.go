@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/grafana/sigil-sdk/go/sigil"
+	"github.com/joho/godotenv"
 	openai "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/shared"
@@ -20,6 +21,8 @@ import (
 )
 
 func main() {
+	_ = godotenv.Load()
+
 	ctx := context.Background()
 	model := "gpt-4.1-mini"
 
