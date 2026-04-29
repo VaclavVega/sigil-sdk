@@ -43,6 +43,10 @@ def setup_opentelemetry() -> OpenTelemetry:
 
     resource = Resource.create({"service.name": service_name})
 
+    endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+    if endpoint == "":
+        os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://localhost:4317"
+
     tracer_provider = TracerProvider(resource=resource)
     tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
     trace.set_tracer_provider(tracer_provider)
