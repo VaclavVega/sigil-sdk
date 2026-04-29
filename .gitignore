@@ -47,6 +47,7 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .mypy_cache/
+python-frameworks/pydantic-ai/build
 
 # e2e outputs
 /test-results/
@@ -71,3 +72,5 @@ scripts/mysql-port-forward.sh
 # Override the global ctags ignore so the cursor plugin's tags package is tracked.
 !plugins/cursor/internal/tags/
 !plugins/cursor/internal/tags/**
+
+examples/getting-started/python-pydantic-ai/.env
