@@ -69,7 +69,8 @@
         "started_at": "\u003cNORMALIZED\u003e",
         "stop_reason": "completed",
         "tags": {
-          "cwd": "/repo/app"
+          "cwd": "/repo/app",
+          "entrypoint": "cursor"
         },
         "tools": [
           {

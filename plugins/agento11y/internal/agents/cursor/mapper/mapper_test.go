@@ -887,6 +887,24 @@ func TestMapFragmentAgentNameOverride(t *testing.T) {
 	}
 }
 
+// TestMapFragment_EntrypointTag pins the built-in entrypoint tag the other
+// coding-agent plugins set: Codex hardcodes its product name and Claude Code
+// copies the transcript's entrypoint. Cursor's tags.Build already supported
+// it; the mapper just never set it.
+func TestMapFragment_EntrypointTag(t *testing.T) {
+	got := MapFragment(Inputs{
+		Fragment:       basicFragment(t),
+		ContentCapture: agento11y.ContentCaptureModeFull,
+		Now:            fixedTime,
+	})
+	if got.Generation.Tags["entrypoint"] != "cursor" {
+		t.Fatalf("Generation.Tags[entrypoint] = %q; want cursor", got.Generation.Tags["entrypoint"])
+	}
+	if got.Start.Tags["entrypoint"] != "cursor" {
+		t.Fatalf("Start.Tags[entrypoint] = %q; want cursor", got.Start.Tags["entrypoint"])
+	}
+}
+
 // TestMapFragment_AgentVersionOverride pins the AGENTO11Y_AGENT_VERSION path:
 // the override replaces the session's cursor_version on the generation and
 // its start, and a blank override keeps the session's version.
