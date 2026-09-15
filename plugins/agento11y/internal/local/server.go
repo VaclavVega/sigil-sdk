@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"mime"
@@ -20,6 +22,7 @@ import (
 	"github.com/grafana/agento11y/go/proto/agento11y/wire"
 	"github.com/grafana/agento11y/plugins/agento11y/internal/dotenv"
 	"github.com/grafana/agento11y/plugins/agento11y/internal/envconfig"
+	"github.com/grafana/agento11y/plugins/agento11y/internal/guardeval"
 )
 
 // Maximum body sizes accepted by the receiver. These guard against
@@ -39,11 +42,18 @@ const (
 // Server is the in-process HTTP handler that records generations from
 // local agent sessions and serves the local viewer API.
 type Server struct {
-	storage      *Storage
-	logger       *log.Logger
-	now          func() time.Time
-	configPath   string
-	configMu     sync.Mutex
+	storage    *Storage
+	logger     *log.Logger
+	now        func() time.Time
+	configPath string
+	configMu   sync.Mutex
+	guards     guardeval.Config
+	// guardsMu protects the compiled-engine cache. The cache is keyed by the
+	// SHA-256 of the file bytes so a rewrite is picked up on the next request
+	// without recompiling an unchanged ruleset on every hook.
+	guardsMu     sync.Mutex
+	guardsDigest [sha256.Size]byte
+	guardsEngine *guardeval.Engine
 	allowedHosts []string
 	mux          *http.ServeMux
 	forward      *forwardLoader
@@ -78,17 +88,28 @@ type Server struct {
 // Cloud forwarder resolves its configuration from; an empty path disables
 // persistence (reads return defaults, writes fail) but keeps the rest of
 // the server usable for tests.
+//
+// guards.toml is resolved in configPath's directory. An empty configPath
+// disables local rules.
 func NewServer(storage *Storage, logger *log.Logger, configPath string) *Server {
+	return newServer(storage, logger, configPath, guardeval.FilePath(configPath))
+}
+
+// newServer is the test seam: it takes the guards ruleset path explicitly so a
+// test can point it at a temp file without also relocating config.env.
+func newServer(storage *Storage, logger *log.Logger, configPath, guardsPath string) *Server {
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)
 	}
 	if storage != nil {
 		storage.SetLogger(logger)
 	}
+	guardConfig := guardeval.Config{RulesPath: guardsPath, Logger: logger}
 	s := &Server{
 		storage:      storage,
 		logger:       logger,
 		configPath:   configPath,
+		guards:       guardConfig,
 		allowedHosts: allowedHostsFromEnv(),
 		now:          func() time.Time { return time.Now().UTC() },
 		forward:      newForwardLoader(configPath, logger),
@@ -151,6 +172,8 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("POST /api/v1/config:preview", s.handlePreviewConfig)
 	mux.HandleFunc("PUT /api/v1/config", s.handleSaveConfig)
 	mux.HandleFunc("PATCH /api/v1/config", s.handlePatchConfig)
+	mux.HandleFunc("GET /api/v1/guards", s.handleGetGuards)
+	mux.HandleFunc("PUT /api/v1/guards", s.handlePutGuards)
 	mux.HandleFunc("GET /api/v1/conversations/{id}", func(w http.ResponseWriter, r *http.Request) {
 		s.handleConversationDetail(w, r, r.PathValue("id"))
 	})
@@ -538,60 +561,120 @@ func (s *Server) handleOTLP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// handleHookEvaluate answers the synchronous guard check every host agent runs
-// before (or right after) a tool call. The local verdict is always allow —
-// there is no local guards engine yet — but when the daemon is configured to
-// forward and guards are on, the request is relayed to Cloud so `--local` still
-// enforces the rules the user configured there.
+// handleHookEvaluate answers the guard check before or after a tool call. The
+// daemon reads and compiles guards.toml for every request, then runs local tool
+// filters, regex evaluators, and redactions. Invalid rules are skipped
+// individually. A local deny returns before relay, so rejected content stays on
+// the machine. If Cloud guard forwarding is configured, surviving requests are
+// evaluated there too.
 //
-// Note what that means for content: a chained evaluation sends whatever the
-// agent asked to have checked — the tool call for a postflight check, the whole
-// outgoing conversation for a preflight one — to Cloud in full, whatever
-// CONTENT_CAPTURE_MODE says, because a guard cannot evaluate what it cannot
-// see. The viewer, the launcher banner, and `agento11y doctor` all report the
-// resolved posture for that reason.
+// Except for local redactions, Cloud receives the tool call for postflight or
+// the outgoing conversation for preflight regardless of CONTENT_CAPTURE_MODE.
+// Guards must see the content they evaluate, so the viewer, launcher banner,
+// and `agento11y doctor` report this posture.
+//
+// The decoder accepts three hook request spellings (see guardwire.go). Local
+// redactions apply to the decoded input before the request is re-encoded for
+// Cloud. Unchanged requests are relayed byte-for-byte.
 func (s *Server) handleHookEvaluate(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxHookBodyBytes+1))
+	body, ok := s.readHookSizedBody(w, r)
+	if !ok {
+		return
+	}
+	req, err := decodeHookEvaluateRequest(body)
 	if err != nil {
-		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	if len(body) > maxHookBodyBytes {
-		http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
-		return
-	}
-	if !json.Valid(body) {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		http.Error(w, "decode body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	resp := agento11y.HookEvaluateResponse{
-		Action:      agento11y.HookActionAllow,
-		Evaluations: []agento11y.HookEvaluation{},
+	cfg := s.forward.load()
+	fallback := time.Duration(cfg.timeoutMs) * time.Millisecond
+	if fallback <= 0 {
+		fallback = time.Duration(envconfig.DefaultGuardsTimeoutMs) * time.Millisecond
+	}
+	timeout := hookTimeoutFromHeader(r, fallback)
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+
+	resp, localTransform, err := s.localEngine().EvaluateWithTransform(ctx, req)
+	if err != nil {
+		if isCallerAbort(err) {
+			s.writeJSON(w, http.StatusOK, encodeHookEvaluateResponse(resp))
+			return
+		}
+		// A local timeout is an evaluation failure, not a Cloud fail-open: the
+		// ruleset did not finish, so the call is denied rather than relayed.
+		s.writeJSON(w, http.StatusOK, encodeHookEvaluateResponse(guardeval.FromHookResponse(denyFromCloudError(body, err))))
+		return
+	}
+	if resp.Action == agento11y.HookActionDeny {
+		s.writeJSON(w, http.StatusOK, encodeHookEvaluateResponse(resp))
+		return
 	}
 
 	// Never chain a payload another daemon relayed here, which would loop.
-	if !isForwardedRequest(r) {
-		if cfg := s.forward.load(); cfg.hookURL != "" {
-			s.chainHookEvaluate(r, cfg, body, &resp)
+	if !isForwardedRequest(r) && cfg.hookURL != "" {
+		relayBody, redacted, prepareErr := prepareHookRelayBody(body, req, localTransform, s.logger)
+		if prepareErr != nil {
+			prepareErr = s.forward.recordHookFailure("prepare Cloud hook relay: %v", prepareErr)
+			if cfg.failOpen {
+				s.forward.recordFailOpen()
+			} else {
+				resp = guardeval.FromHookResponse(denyFromCloudError(body, prepareErr))
+			}
+		} else {
+			if redacted {
+				// AGENTO11Y_DEBUG only: confirms relay redaction without logging values.
+				s.logger.Printf("local guards: relaying a redacted body to Cloud")
+			}
+			s.chainHookEvaluate(ctx, cfg, body, relayBody, localTransform, &resp)
 		}
 	}
-	s.writeJSON(w, http.StatusOK, resp)
+	s.writeJSON(w, http.StatusOK, encodeHookEvaluateResponse(resp))
 }
 
-// chainHookEvaluate replaces the local verdict with Cloud's. A failed call
-// follows the resolved fail mode: fail-open keeps the local allow, fail-closed
-// denies with a response labelled as an evaluation failure so no consumer
-// reports it as a policy decision.
-func (s *Server) chainHookEvaluate(r *http.Request, cfg forwardConfig, body []byte, resp *agento11y.HookEvaluateResponse) {
-	timeout := hookTimeoutFromHeader(r, time.Duration(cfg.timeoutMs)*time.Millisecond)
-	ctx, cancel := context.WithTimeout(r.Context(), timeout)
-	defer cancel()
+func prepareHookRelayBody(body []byte, req agento11y.HookEvaluateRequest, localTransform *guardeval.Transform, logger *log.Logger) ([]byte, bool, error) {
+	if localTransform == nil {
+		return body, false, nil
+	}
+	relayInput, changed, dropped := guardeval.ApplyRelayTransform(req.Input, localTransform, logger)
+	if len(dropped) > 0 {
+		return nil, false, fmt.Errorf("local redaction of %s would produce invalid JSON", strings.Join(dropped, ", "))
+	}
+	if !changed {
+		return body, false, nil
+	}
+	encoded, err := encodeRelayBody(req.Phase, req.Context, relayInput)
+	if err != nil {
+		return nil, false, fmt.Errorf("encode redacted request: %w", err)
+	}
+	return encoded, true, nil
+}
+
+// chainHookEvaluate merges the Cloud verdict after the local verdict. Cloud
+// supplies the action, rule ID, and reason. A local transform survives when
+// Cloud supplies none, and local evaluations remain first. The Cloud call
+// uses whatever of ctx remains after local evaluation, so the two stages
+// share the agent's hook budget. On failure, fail-open keeps the local
+// verdict; fail-closed returns an evaluation-failure deny.
+func (s *Server) chainHookEvaluate(ctx context.Context, cfg forwardConfig, originalBody, body []byte, localTransform *guardeval.Transform, resp *guardeval.Response) {
+	timeout := time.Duration(cfg.timeoutMs) * time.Millisecond
+	if deadline, ok := ctx.Deadline(); ok {
+		timeout = time.Until(deadline)
+		if timeout <= 0 {
+			if cfg.failOpen {
+				s.forward.recordFailOpen()
+			} else {
+				*resp = guardeval.FromHookResponse(denyFromCloudError(originalBody, context.DeadlineExceeded))
+			}
+			return
+		}
+	}
 
 	cloud, err := s.forward.evaluateCloudHook(ctx, cfg, timeout, body)
 	switch {
 	case err == nil:
-		*resp = cloud
+		mergeCloudVerdict(resp, cloud, localTransform, s.logger)
 	case isCallerAbort(err):
 		// The agent stopped waiting, so whatever this handler writes is not a
 		// verdict anything acted on. Leaving the counters alone here is the
@@ -603,8 +686,76 @@ func (s *Server) chainHookEvaluate(r *http.Request, cfg forwardConfig, body []by
 		// silently stopped enforcing would otherwise leave no trace.
 		s.forward.recordFailOpen()
 	default:
-		*resp = denyFromCloudError(body, err)
+		*resp = guardeval.FromHookResponse(denyFromCloudError(originalBody, err))
 	}
+}
+
+// mergeCloudVerdict folds a Cloud response into the local one. Cloud decides
+// the action, so its rule id and reason travel with it even when empty:
+// carrying a local rule id under a Cloud action would name the wrong rule.
+//
+// The transform needs more care:
+//
+//   - Cloud sends no transform: its silence means "no opinion", so the local
+//     rewrite stands.
+//   - Cloud sends one: the local patterns run over it again with the relay
+//     transform, including thinking, because Cloud does not state whether its
+//     transformed input came from the redacted relay. If that would produce
+//     invalid JSON, the local rewrite stands instead.
+//   - Cloud denies: the call does not run, so the local rewrite is not
+//     re-attached. Only what Cloud sent survives.
+func mergeCloudVerdict(resp *guardeval.Response, cloud agento11y.HookEvaluateResponse, localTransform *guardeval.Transform, logger *log.Logger) {
+	localTransformed := resp.TransformedInput
+	localEvaluations := resp.Evaluations
+	localRuleID := resp.RuleID
+	cloudResponse := guardeval.FromHookResponse(cloud)
+
+	*resp = cloudResponse
+	var dropped []string
+	switch {
+	case cloud.Action == agento11y.HookActionDeny:
+	case cloud.TransformedInput == nil:
+		resp.TransformedInput = localTransformed
+	case localTransform != nil:
+		redacted, _, drops := guardeval.ApplyRelayTransform(*cloud.TransformedInput, localTransform, logger)
+		dropped = drops
+		if len(drops) > 0 {
+			resp.TransformedInput = localTransformed
+		} else {
+			resp.TransformedInput = &redacted
+		}
+	}
+	merged := append([]guardeval.Evaluation{}, localEvaluations...)
+	merged = append(merged, droppedRedactionEvaluations(localRuleID, dropped)...)
+	resp.Evaluations = append(merged, cloudResponse.Evaluations...)
+}
+
+// droppedRedactionEvaluations reports local transforms that could not be
+// applied to Cloud's transformed input. The Cloud rewrite is discarded, but
+// the evaluation explains why its changes are absent.
+func droppedRedactionEvaluations(ruleID string, dropped []string) []guardeval.Evaluation {
+	out := make([]guardeval.Evaluation, 0, len(dropped))
+	for _, what := range dropped {
+		out = append(out, guardeval.Evaluation{
+			RuleID:        ruleID,
+			EvaluatorKind: "transform",
+			Reason:        fmt.Sprintf("the local redaction of %s would make Cloud's rewrite invalid JSON, so Cloud's rewrite was discarded", what),
+		})
+	}
+	return out
+}
+
+func (s *Server) readHookSizedBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxHookBodyBytes+1))
+	if err != nil {
+		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+		return nil, false
+	}
+	if len(body) > maxHookBodyBytes {
+		http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
+		return nil, false
+	}
+	return body, true
 }
 
 // configResponse is the GET, PUT, and PATCH /api/v1/config payload:
@@ -625,6 +776,17 @@ type configResponse struct {
 	// part of Settings, so a save never writes or deletes it.
 	StackURL      string        `json:"stackUrl"`
 	ForwardStatus forwardStatus `json:"forwardStatus"`
+	// LocalGuards reports local-rule posture separately from Cloud forwarding;
+	// either can be active without the other.
+	LocalGuards localGuardsStatus `json:"localGuards"`
+}
+
+type localGuardsStatus struct {
+	guardeval.Posture
+	// Enabled reflects GUARDS_ENABLED from config.env and defaults to false. A
+	// host using that setting sends no hook requests. Launchers resolve their own
+	// environment because the daemon cannot observe process-level overrides.
+	Enabled bool `json:"enabled"`
 }
 
 // configRequest is the POST :preview / PUT body: the form state the viewer
@@ -743,6 +905,7 @@ func (s *Server) writeConfigResponse(w http.ResponseWriter, env map[string]strin
 		Path:          displayConfigPath(s.configPath),
 		StackURL:      stackURLFrom(env),
 		ForwardStatus: s.forward.status(),
+		LocalGuards:   s.localGuardsStatus(),
 	})
 }
 

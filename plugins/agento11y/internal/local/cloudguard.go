@@ -110,7 +110,7 @@ func (l *forwardLoader) evaluateCloudHook(ctx context.Context, cfg forwardConfig
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return out, l.recordHookFailure("POST %s status %d: %s", cfg.hookURL, resp.StatusCode, hookFailureDetail(respBody, http.StatusText(resp.StatusCode)))
 	}
-	if err := json.Unmarshal(respBody, &out); err != nil {
+	if out, err = decodeHookEvaluateResponse(respBody); err != nil {
 		return out, l.recordHookFailure("decode response from %s: %v", cfg.hookURL, err)
 	}
 	// Mirrors the SDK's own decode: an omitted action is an allow.
@@ -162,11 +162,11 @@ func (l *forwardLoader) recordHookFailure(format string, args ...any) error {
 	return fmt.Errorf(format, args...)
 }
 
-// hookTimeoutFromHeader resolves the budget for the daemon's Cloud hook call
-// from the deadline the calling agent propagated, falling back to the given
-// value when no usable header is present. Both header spellings are read, the
-// branded one wins, and a margin is shaved off so the Cloud call returns before
-// the agent's own hook deadline fires.
+// hookTimeoutFromHeader resolves the budget for local evaluation and the
+// Cloud hook call from the deadline the calling agent propagated, falling back
+// to the given value when no usable header is present. Both header spellings
+// are read, the branded one wins, and a margin is shaved off so the daemon
+// returns before the agent's own hook deadline fires.
 //
 // fallback is expected to be positive; intFamily guarantees that for the only
 // production caller.
