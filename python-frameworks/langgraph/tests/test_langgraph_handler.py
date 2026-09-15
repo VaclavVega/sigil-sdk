@@ -7,13 +7,14 @@ from datetime import timedelta
 from uuid import uuid4
 
 from agento11y import Client, ClientConfig, GenerationExportConfig
-from agento11y.models import ExportGenerationResult, ExportGenerationsResponse
+from agento11y.models import ExportGenerationResult, ExportGenerationsResponse, MessageRole, PartKind
 from agento11y_langgraph import (
     Agento11yAsyncLangGraphHandler,
     Agento11yLangGraphHandler,
     create_agento11y_langgraph_handler,
     with_agento11y_langgraph_callbacks,
 )
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -483,5 +484,48 @@ def test_langgraph_handler_explicitly_has_no_embedding_lifecycle() -> None:
         assert not hasattr(handler, "on_embedding_start")
         assert not hasattr(handler, "on_embedding_end")
         assert not hasattr(handler, "on_embedding_error")
+    finally:
+        client.shutdown()
+
+
+def test_langgraph_exports_tool_messages_as_tool_result_parts() -> None:
+    """A ToolMessage in the next turn's input lands as a TOOL_RESULT part, not text (#620)."""
+    exporter = _CapturingExporter()
+    client = _new_client(exporter)
+
+    try:
+        run_id = uuid4()
+        handler = Agento11yLangGraphHandler(client=client)
+
+        handler.on_chat_model_start(
+            {"name": "ChatAnthropic"},
+            [
+                [
+                    HumanMessage(content="What did we spend last month on eating out?"),
+                    AIMessage(
+                        content="I'll pull that up.",
+                        tool_calls=[{"id": "call_1", "name": "get_category_detail", "args": {"category": "dining"}}],
+                    ),
+                    ToolMessage(
+                        content='{"category": "Restaurants", "total": 2110.96}',
+                        tool_call_id="call_1",
+                        name="get_category_detail",
+                    ),
+                ]
+            ],
+            run_id=run_id,
+            invocation_params={"model": "claude-sonnet-5"},
+        )
+        handler.on_llm_end({"generations": [[{"text": "You spent $2,110.96 on restaurants."}]]}, run_id=run_id)
+
+        client.flush()
+        generation = exporter.requests[0].generations[0]
+        tool_messages = [message for message in generation.input if message.role is MessageRole.TOOL]
+        assert len(tool_messages) == 1
+        [part] = tool_messages[0].parts
+        assert part.kind is PartKind.TOOL_RESULT
+        assert part.tool_result.tool_call_id == "call_1"
+        assert part.tool_result.name == "get_category_detail"
+        assert part.tool_result.content == '{"category": "Restaurants", "total": 2110.96}'
     finally:
         client.shutdown()

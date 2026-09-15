@@ -1522,6 +1522,15 @@ def _map_chat_inputs(messages: list[list[Any]]) -> tuple[list[Message], str]:
 
 
 def _map_chat_input_message(message: Any) -> Message | None:
+    # A LangChain ToolMessage carries its output in `content`, with
+    # `tool_call_id`, `name`, and `status` on the message itself and no
+    # `tool_results` attribute. Reading it as text loses the tool result: an
+    # evaluator that fills `{{tool_results}}` from TOOL_RESULT parts then sees
+    # none, and scores a grounded answer as unsupported (#620).
+    tool_result_part = _map_inline_tool_message_part(message)
+    if tool_result_part is not None:
+        return Message(role=MessageRole.TOOL, parts=[tool_result_part])
+
     parts: list[Part] = []
 
     text = _extract_message_text(message)
@@ -1542,6 +1551,34 @@ def _map_chat_input_message(message: Any) -> Message | None:
         return None
 
     return Message(role=_normalize_message_role(message, parts), parts=parts)
+
+
+def _map_inline_tool_message_part(message: Any) -> Part | None:
+    """Map a tool-role message that carries its result inline to a tool-result part.
+
+    This is the LangChain ``ToolMessage`` shape: role ``tool``, the output in
+    ``content``, and ``tool_call_id`` / ``name`` / ``status`` on the message.
+    Messages that list results under ``tool_results`` keep their existing
+    mapping; every other shape returns ``None``.
+    """
+    if _as_list(_read(message, "tool_results")):
+        return None
+    if _normalize_role(_extract_message_role(message)) is not MessageRole.TOOL:
+        return None
+    tool_call_id = _first_non_empty_str(_read(message, "tool_call_id"), _read(message, "toolCallId"))
+    if tool_call_id == "":
+        return None
+    if _read(message, "content") is None:
+        return None
+    return Part(
+        kind=PartKind.TOOL_RESULT,
+        tool_result=ToolResult(
+            tool_call_id=tool_call_id,
+            name=_as_str(_read(message, "name")),
+            content=_extract_message_text(message),
+            is_error=_as_str(_read(message, "status")).strip().lower() == "error",
+        ),
+    )
 
 
 def _map_output_messages(response: Any) -> list[Message]:

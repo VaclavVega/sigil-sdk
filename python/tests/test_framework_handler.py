@@ -6,7 +6,8 @@ import logging
 from uuid import uuid4
 
 import pytest
-from agento11y.framework_handler import Agento11yFrameworkHandlerBase, _extract_tool_output
+from agento11y.framework_handler import Agento11yFrameworkHandlerBase, _extract_tool_output, _map_chat_input_message
+from agento11y.models import MessageRole, PartKind
 
 
 class _FakeToolMessage:
@@ -83,3 +84,55 @@ def test_tool_callbacks_log_recorder_errors_instead_of_raising(outcome, recorder
     if expect_log:
         assert str(run_id) in caplog.text
         assert "serialize tool result" in caplog.text
+
+
+class _FakeLangChainToolMessage:
+    """The attribute shape of langchain_core.messages.ToolMessage."""
+
+    type = "tool"
+
+    def __init__(self, content, tool_call_id, name="", status="success"):
+        self.content = content
+        self.tool_call_id = tool_call_id
+        self.name = name
+        self.status = status
+
+
+def test_map_chat_input_message_maps_tool_message_to_tool_result_part() -> None:
+    message = _FakeLangChainToolMessage(
+        '{"category": "Restaurants", "total": 2110.96}', tool_call_id="call_1", name="get_category_detail"
+    )
+
+    mapped = _map_chat_input_message(message)
+
+    assert mapped is not None
+    assert mapped.role is MessageRole.TOOL
+    assert [part.kind for part in mapped.parts] == [PartKind.TOOL_RESULT]
+    result = mapped.parts[0].tool_result
+    assert result.tool_call_id == "call_1"
+    assert result.name == "get_category_detail"
+    assert result.content == '{"category": "Restaurants", "total": 2110.96}'
+    assert result.is_error is False
+
+
+def test_map_chat_input_message_marks_errored_tool_message() -> None:
+    mapped = _map_chat_input_message(_FakeLangChainToolMessage("boom", tool_call_id="call_2", status="error"))
+
+    assert mapped is not None
+    assert mapped.parts[0].tool_result.is_error is True
+
+
+def test_map_chat_input_message_keeps_empty_tool_output_as_a_result() -> None:
+    mapped = _map_chat_input_message(_FakeLangChainToolMessage("", tool_call_id="call_3", name="noop"))
+
+    assert mapped is not None
+    assert mapped.parts[0].kind is PartKind.TOOL_RESULT
+    assert mapped.parts[0].tool_result.content == ""
+
+
+def test_map_chat_input_message_leaves_other_roles_as_text() -> None:
+    mapped = _map_chat_input_message({"type": "human", "content": "What did we spend last month?"})
+
+    assert mapped is not None
+    assert mapped.role is MessageRole.USER
+    assert [part.kind for part in mapped.parts] == [PartKind.TEXT]
