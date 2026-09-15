@@ -180,6 +180,17 @@ func SetStartDaemonForTesting(fn func(ctx context.Context, dir string, logger *l
 	return func() { startDaemonFn = prev }
 }
 
+// drainTimeout bounds how long the daemon lets in-flight requests finish
+// after SIGTERM before it closes the server regardless.
+const drainTimeout = 3 * time.Second
+
+// stopTimeout bounds how long Stop waits for the daemon to exit. It has to
+// exceed drainTimeout: the viewer runs multi-second scans, so a request in
+// flight at SIGTERM is the normal case, and a wait no longer than the drain
+// reported a failure for a daemon that exited a moment later. The margin
+// covers the shutdown after the drain and the status-file removal.
+const stopTimeout = drainTimeout + 2*time.Second
+
 // Stop sends SIGTERM to the recorded daemon after verifying the live PID
 // still looks like `agento11y local serve`. Returns (false, nil) when no
 // daemon is recorded, the recorded process is gone, or the live PID is
@@ -213,8 +224,9 @@ func Stop(dir string) (bool, error) {
 		return false, err
 	}
 	// Poll for the daemon to exit. We don't own the child, so we cannot
-	// wait(2); 3s is plenty for an HTTP server with no in-flight work.
-	deadline := time.Now().Add(3 * time.Second)
+	// wait(2). The daemon drains in-flight requests for drainTimeout first,
+	// so the wait has to outlast that.
+	deadline := time.Now().Add(stopTimeout)
 	for time.Now().Before(deadline) {
 		if !pidAlive(s.PID) {
 			_ = RemoveStatus(dir)
@@ -222,7 +234,7 @@ func Stop(dir string) (bool, error) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return false, fmt.Errorf("daemon (pid %d) did not exit within 3s", s.PID)
+	return false, fmt.Errorf("daemon (pid %d) did not exit within %s", s.PID, stopTimeout)
 }
 
 // Serve runs the local receiver synchronously. Listens on 127.0.0.1
@@ -296,7 +308,7 @@ func Serve(ctx context.Context, dir string, port int, logger *log.Logger) error 
 
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), drainTimeout)
 		defer cancel()
 		// Close the event hub first so open SSE streams return immediately
 		// instead of holding the shutdown deadline open.

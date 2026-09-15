@@ -3,6 +3,7 @@
 package local
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"log"
@@ -403,4 +404,52 @@ func (w *testLogWriter) stop() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.stopped = true
+}
+
+// TestStop_WaitsPastTheDrain stops a process that takes four seconds to honor
+// SIGTERM, the way the daemon does when a slow request is in flight and it
+// drains for drainTimeout first. Stop has to outlast that drain: before the
+// wait exceeded it, this reported "did not exit within 3s" and exited 1 for a
+// daemon that exited a moment later.
+func TestStop_WaitsPastTheDrain(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh command unavailable")
+	}
+	dir := t.TempDir()
+	// The shell prints "ready" once the trap is armed; signaling it before
+	// that would hit the default action and end the process at once.
+	cmd := exec.Command("sh", "-c", `trap 'sleep 4; exit 0' TERM; echo ready; while :; do sleep 0.1; done`)
+	stdout, err := cmd.StdoutPipe()
+	require.NoError(t, err)
+	require.NoError(t, cmd.Start())
+	ready, err := bufio.NewReader(stdout).ReadString('\n')
+	require.NoError(t, err)
+	require.Equal(t, "ready\n", ready)
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	waited := false
+	t.Cleanup(func() {
+		if waited {
+			return
+		}
+		_ = cmd.Process.Kill()
+		<-done
+	})
+	withProcessCommandLine(t, func(pid int) (string, error) {
+		require.Equal(t, cmd.Process.Pid, pid)
+		return "/usr/local/bin/agento11y local serve", nil
+	})
+	require.NoError(t, SaveStatus(dir, Status{PID: cmd.Process.Pid, Port: 1, Endpoint: "http://127.0.0.1:1"}))
+
+	stopped, err := Stop(dir)
+	require.NoError(t, err, "a daemon still draining after SIGTERM is within the stop wait")
+	assert.True(t, stopped)
+	select {
+	case <-done:
+		waited = true
+	case <-time.After(time.Second):
+		t.Fatal("process still running after Stop returned")
+	}
+	_, err = os.Stat(filepath.Join(dir, StatusFile))
+	assert.True(t, os.IsNotExist(err), "status file should be removed once the daemon exits")
 }
