@@ -33,6 +33,7 @@ import { ACTIVE_PILL_BG, Notice, PANEL_BG, SurfaceCard } from './notices';
 import { conversationPath, conversationsPath, isPlainLeftClick } from './routing';
 import { agentHosts, Icon, iconBtn, ModelPill } from './shell';
 import type {
+  BranchMetricsAggregate,
   ConversationMetricsAggregate,
   ConversationSummary,
   ModelPrices,
@@ -70,6 +71,8 @@ export interface AnalyticsViewProps {
   facetError: string | null;
   tokenError: string | null;
   heatmapError: string | null;
+  mergeLoading?: boolean;
+  mergeError?: string | null;
   unit: AnalyticsUnit;
   onUnitChange: (v: AnalyticsUnit) => void;
   timeRange: string;
@@ -101,6 +104,18 @@ interface ModelUsageSource {
 
 interface WorkspaceRow extends WorkspaceAggregate {}
 
+interface BranchRow {
+  workspace: string;
+  name: string;
+  count: number;
+  cost: number | null;
+  costComplete: boolean;
+  tokens: number;
+  dur: number;
+  last: number;
+  mergeStatus?: BranchMetricsAggregate['merge_status'];
+}
+
 interface SparkValue {
   key: number;
   value: number;
@@ -121,6 +136,7 @@ interface KpiCardProps {
 
 interface PanelHeaderProps {
   title: string;
+  infoTooltip?: string;
   meta?: React.ReactNode;
 }
 
@@ -132,6 +148,11 @@ const EMPTY_BUCKETS: TokenBuckets = {
   reasoning: 0,
 };
 const WORKSPACE_GRID = 'minmax(96px, 1fr) minmax(56px, 110px) 52px 52px 56px';
+const BRANCH_GRID = 'minmax(80px, 1fr) 64px minmax(48px, 100px) 48px 48px 52px';
+const MERGE_STATUS_GRID = 'minmax(72px, 1fr) minmax(56px, 110px) 52px 52px 56px';
+const SHARE_FILL = 'var(--brand-orange)';
+const MERGE_STATUS_TOOLTIP =
+  "Compared with each workspace's current git default branch using local refs from the last fetch. Run git fetch in the workspace to refresh.";
 const MODEL_GRID = 'minmax(72px, 1fr) 70px 68px 56px';
 const SHAPE_GRID = '82px minmax(0, 1fr) 26px';
 const SESSION_GRID = '26px minmax(0, 1fr) 130px 84px 88px 128px 88px';
@@ -266,6 +287,61 @@ function aggregateWorkspaces(
   return [...rows.values()];
 }
 
+function branchKey(workspace: string, name: string) {
+  return `${workspace}\0${name}`;
+}
+
+function branchAggregateRows(branches: readonly BranchMetricsAggregate[], prices: ModelPrices | null): BranchRow[] {
+  return branches.map((branch) => {
+    const estimate = conversationCostEstimateByModel(branch, prices);
+    const last = Date.parse(branch.last_activity);
+    return {
+      workspace: branch.workspace || '',
+      name: branch.name || '',
+      count: branch.sessions,
+      cost: estimate.value,
+      costComplete: estimate.complete,
+      tokens: tokenTotal(branch.token_buckets),
+      dur: branch.duration_seconds,
+      last: Number.isFinite(last) ? last : 0,
+      mergeStatus: branch.merge_status,
+    };
+  });
+}
+
+function aggregateBranches(conversations: readonly ConversationSummary[], prices: ModelPrices | null): BranchRow[] {
+  const rows = new Map<string, BranchRow>();
+  for (const conversation of conversations) {
+    const workspace = conversation.workspace || '';
+    const name = conversation.branch || '';
+    const key = branchKey(workspace, name);
+    let row = rows.get(key);
+    if (!row) {
+      row = {
+        workspace,
+        name,
+        count: 0,
+        cost: null,
+        costComplete: true,
+        tokens: 0,
+        dur: 0,
+        last: 0,
+      };
+      rows.set(key, row);
+    }
+    row.count++;
+    row.tokens += tokenTotal(conversation.token_buckets);
+    const estimate = conversationCostEstimateByModel(conversation, prices);
+    if (!estimate.complete) row.costComplete = false;
+    if (estimate.value != null) row.cost = (row.cost || 0) + estimate.value;
+    const duration = durationBetweenSeconds(conversation.started_at, conversation.last_activity);
+    if (duration != null) row.dur += duration;
+    const last = conversationTime(conversation);
+    if (last != null) row.last = Math.max(row.last, last);
+  }
+  return [...rows.values()];
+}
+
 function aggregateModels(conversations: readonly ModelUsageSource[], prices: ModelPrices | null): ModelAggregate[] {
   const rows = new Map<string, { buckets: TokenBuckets }>();
   for (const conversation of conversations) {
@@ -300,6 +376,69 @@ function aggregateModels(conversations: readonly ModelUsageSource[], prices: Mod
 function sortByUnit<T extends { tokens: number; cost: number | null }>(rows: readonly T[], unit: AnalyticsUnit): T[] {
   const value = (row: T) => (unit === 'cost' ? (row.cost ?? -1) : row.tokens);
   return [...rows].sort((a, b) => value(b) - value(a));
+}
+
+function mergeStatusIcon(status: BranchRow['mergeStatus']): { color: string; label: string; icon: string } {
+  switch (status) {
+    case 'open':
+      return { color: 'var(--viz-green)', label: 'open', icon: 'gitbranch' };
+    case 'merged':
+      return { color: 'var(--viz-purple)', label: 'merged', icon: 'gitbranch' };
+    case 'closed':
+      return { color: 'var(--viz-red)', label: 'closed', icon: 'gitbranch' };
+    case 'default':
+      return { color: 'var(--fg2)', label: 'default', icon: 'gitbranch' };
+    default:
+      return { color: 'var(--fg3)', label: 'unknown', icon: 'empty' };
+  }
+}
+
+function mergeStatusLabel(status: BranchRow['mergeStatus']): string {
+  return mergeStatusIcon(status).label;
+}
+
+function MergeStatusSpinner() {
+  return (
+    <span
+      className="sigil-spin"
+      title="Checking git"
+      role="status"
+      aria-label="Checking git"
+      style={{
+        width: 12,
+        height: 12,
+        borderRadius: '50%',
+        border: '2px solid var(--border-strong)',
+        borderTopColor: 'var(--fg2)',
+        display: 'inline-block',
+      }}
+    />
+  );
+}
+
+interface MergeStatusRow {
+  status: BranchRow['mergeStatus'];
+  count: number;
+  cost: number | null;
+  costComplete: boolean;
+  tokens: number;
+}
+
+function aggregateMergeStatus(rows: readonly BranchRow[]): MergeStatusRow[] {
+  const groups = new Map<string, MergeStatusRow>();
+  for (const row of rows) {
+    const key = row.mergeStatus || '';
+    let group = groups.get(key);
+    if (!group) {
+      group = { status: row.mergeStatus, count: 0, cost: null, costComplete: true, tokens: 0 };
+      groups.set(key, group);
+    }
+    group.count += row.count;
+    group.tokens += row.tokens;
+    if (!row.costComplete) group.costComplete = false;
+    if (row.cost != null) group.cost = (group.cost || 0) + row.cost;
+  }
+  return [...groups.values()];
 }
 
 const DELTA_BASELINE = 'vs previous period';
@@ -355,7 +494,7 @@ function CostYAxis({ top, mid, side = 'left' }: { top: string; mid: string; side
   );
 }
 
-function PanelHeader({ title, meta }: PanelHeaderProps) {
+function PanelHeader({ title, infoTooltip, meta }: PanelHeaderProps) {
   return (
     <div
       style={{
@@ -368,7 +507,23 @@ function PanelHeader({ title, meta }: PanelHeaderProps) {
         flexWrap: 'wrap',
       }}
     >
-      <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--fg-max)' }}>{title}</span>
+      <span
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 5,
+          fontSize: 13,
+          fontWeight: 600,
+          color: 'var(--fg-max)',
+        }}
+      >
+        {title}
+        {infoTooltip ? (
+          <span title={infoTooltip} style={{ display: 'inline-flex', color: 'var(--fg3)' }}>
+            <Icon name="info" size={12} />
+          </span>
+        ) : null}
+      </span>
       {meta != null && (
         <span style={{ fontFamily: 'var(--fontFamilyMonospace)', fontSize: 11, color: 'var(--fg3)' }}>{meta}</span>
       )}
@@ -1073,7 +1228,7 @@ function WorkspacesPanel({
                         display: 'block',
                         width: `${Math.max(0, Math.min(100, (value / max) * 100))}%`,
                         height: '100%',
-                        background: unit === 'cost' ? 'var(--brand-orange)' : 'var(--viz-green)',
+                        background: SHARE_FILL,
                       }}
                     />
                   </span>
@@ -1092,6 +1247,309 @@ function WorkspacesPanel({
                   {formatCostEstimate({ value: row.cost, complete: row.costComplete })}
                 </span>
               </a>
+            );
+          })}
+        </div>
+      )}
+    </SurfaceCard>
+  );
+}
+
+function BranchesPanel({
+  rows,
+  unit,
+  onOpen,
+  empty,
+  loading,
+}: {
+  rows: BranchRow[];
+  unit: AnalyticsUnit;
+  onOpen: (path: string) => void;
+  empty: React.ReactNode;
+  loading?: boolean;
+}) {
+  const sorted = sortByUnit(rows, unit).slice(0, 6);
+  const costComplete = rows.every((row) => row.costComplete);
+  const total = rows.reduce((sum, row) => sum + (unit === 'cost' ? row.cost || 0 : row.tokens), 0);
+  const max = Math.max(1, ...sorted.map((row) => (unit === 'cost' ? row.cost || 0 : row.tokens)));
+  return (
+    <SurfaceCard style={{ boxShadow: 'none', minWidth: 0 }} data-testid="branches">
+      <PanelHeader
+        title="Branches"
+        infoTooltip={MERGE_STATUS_TOOLTIP}
+        meta={`${loading ? 'checking git · ' : ''}sorted by ${unit}${unit === 'cost' && !costComplete ? ' · partial estimate' : ''}`}
+      />
+      {sorted.length === 0 ? (
+        <EmptyPanel>{empty}</EmptyPanel>
+      ) : (
+        <div style={{ padding: '0 18px 14px' }}>
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: BRANCH_GRID,
+              gap: 10,
+              padding: '11px 0 9px',
+              borderBottom: '1px solid var(--border-weak)',
+              color: 'var(--fg3)',
+              fontSize: 11,
+            }}
+          >
+            <span>Branch</span>
+            <span style={{ textAlign: 'center' }}>Status</span>
+            <span>Share</span>
+            <span style={{ textAlign: 'right' }}>Sessions</span>
+            <span style={{ textAlign: 'right' }}>Tokens</span>
+            <span style={{ textAlign: 'right' }}>Cost</span>
+          </div>
+          {sorted.map((row) => {
+            const workspace = splitWorkspacePath(row.workspace);
+            const value = unit === 'cost' ? row.cost || 0 : row.tokens;
+            const share = total > 0 ? Math.round((value / total) * 100) : 0;
+            const branchLabel = row.name || '(unknown)';
+            const status = mergeStatusIcon(row.mergeStatus);
+            const statusKey = loading ? 'loading' : row.mergeStatus || 'unknown';
+            return (
+              <a
+                key={branchKey(row.workspace, row.name)}
+                data-branch-row={`${row.workspace}::${row.name}`}
+                href={conversationsPath(row.workspace)}
+                onClick={(event) => {
+                  if (!isPlainLeftClick(event)) return;
+                  event.preventDefault();
+                  onOpen(row.workspace);
+                }}
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: BRANCH_GRID,
+                  alignItems: 'center',
+                  gap: 10,
+                  padding: '11px 0',
+                  borderBottom: '1px solid var(--border-weak)',
+                  color: 'inherit',
+                  fontFamily: 'var(--fontFamilyMonospace)',
+                  fontSize: 12,
+                  textDecoration: 'none',
+                }}
+                onMouseEnter={(event) => (event.currentTarget.style.background = 'var(--row-hover)')}
+                onMouseLeave={(event) => (event.currentTarget.style.background = 'transparent')}
+              >
+                <span
+                  title={`${branchLabel}${row.workspace ? ` · ${row.workspace}` : ''}`}
+                  style={{
+                    minWidth: 0,
+                    display: 'flex',
+                    alignItems: 'baseline',
+                    gap: 5,
+                    overflow: 'hidden',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  <span
+                    style={{
+                      flex: '0 0 auto',
+                      color: 'var(--fg-max)',
+                      fontFamily: 'var(--fontFamily)',
+                      fontSize: 12.5,
+                      fontWeight: 600,
+                    }}
+                  >
+                    {branchLabel}
+                  </span>
+                  <span
+                    style={{
+                      flex: '0 1 auto',
+                      minWidth: 0,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      color: 'var(--fg3)',
+                      fontSize: 11,
+                    }}
+                  >
+                    {workspace.leaf}
+                  </span>
+                </span>
+                <span
+                  data-merge-status={statusKey}
+                  title={loading ? 'Checking git' : status.label}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: loading ? 'var(--fg3)' : status.color,
+                  }}
+                >
+                  {loading ? <MergeStatusSpinner /> : <Icon name={status.icon} size={14} />}
+                </span>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span
+                    style={{
+                      flex: 1,
+                      height: 6,
+                      borderRadius: 2,
+                      overflow: 'hidden',
+                      background: 'var(--bar-track)',
+                    }}
+                  >
+                    <span
+                      style={{
+                        display: 'block',
+                        width: `${Math.max(0, Math.min(100, (value / max) * 100))}%`,
+                        height: '100%',
+                        background: SHARE_FILL,
+                      }}
+                    />
+                  </span>
+                  <span style={{ width: 26, textAlign: 'right', color: 'var(--fg3)', fontSize: 10.5 }}>
+                    {unit === 'cost' && !costComplete ? '—' : `${share}%`}
+                  </span>
+                </span>
+                <span style={{ textAlign: 'right', color: 'var(--fg2)' }}>{formatInteger(row.count)}</span>
+                <span style={{ textAlign: 'right', color: unit === 'tokens' ? 'var(--fg-max)' : 'var(--fg1)' }}>
+                  {formatTokens(row.tokens)}
+                </span>
+                <span
+                  title={costEstimateTitle({ value: row.cost, complete: row.costComplete })}
+                  style={{ textAlign: 'right', color: unit === 'cost' ? 'var(--fg-max)' : 'var(--fg1)' }}
+                >
+                  {formatCostEstimate({ value: row.cost, complete: row.costComplete })}
+                </span>
+              </a>
+            );
+          })}
+        </div>
+      )}
+    </SurfaceCard>
+  );
+}
+
+function MergeStatusPanel({
+  rows,
+  unit,
+  empty,
+  loading,
+  error,
+}: {
+  rows: BranchRow[];
+  unit: AnalyticsUnit;
+  empty: React.ReactNode;
+  loading?: boolean;
+  error?: string | null;
+}) {
+  const grouped = sortByUnit(aggregateMergeStatus(rows), unit);
+  const costComplete = grouped.every((row) => row.costComplete);
+  const total = grouped.reduce((sum, row) => sum + (unit === 'cost' ? row.cost || 0 : row.tokens), 0);
+  const max = Math.max(1, ...grouped.map((row) => (unit === 'cost' ? row.cost || 0 : row.tokens)));
+  return (
+    <SurfaceCard style={{ boxShadow: 'none', minWidth: 0 }} data-testid="merge-status">
+      <PanelHeader
+        title="Merge status"
+        infoTooltip={MERGE_STATUS_TOOLTIP}
+        meta={`sorted by ${unit}${unit === 'cost' && !costComplete ? ' · partial estimate' : ''}`}
+      />
+      {error ? (
+        <EmptyPanel>Failed to load merge status: {error}</EmptyPanel>
+      ) : loading ? (
+        <EmptyPanel>Checking git merge status…</EmptyPanel>
+      ) : grouped.length === 0 ? (
+        <EmptyPanel>{empty}</EmptyPanel>
+      ) : (
+        <div style={{ padding: '0 18px 14px' }}>
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: MERGE_STATUS_GRID,
+              gap: 10,
+              padding: '11px 0 9px',
+              borderBottom: '1px solid var(--border-weak)',
+              color: 'var(--fg3)',
+              fontSize: 11,
+            }}
+          >
+            <span>Status</span>
+            <span>Share</span>
+            <span style={{ textAlign: 'right' }}>Sessions</span>
+            <span style={{ textAlign: 'right' }}>Tokens</span>
+            <span style={{ textAlign: 'right' }}>Cost</span>
+          </div>
+          {grouped.map((row) => {
+            const value = unit === 'cost' ? row.cost || 0 : row.tokens;
+            const share = total > 0 ? Math.round((value / total) * 100) : 0;
+            const icon = mergeStatusIcon(row.status);
+            const label = mergeStatusLabel(row.status);
+            return (
+              <div
+                key={row.status || 'unknown'}
+                data-merge-status-row={row.status || 'unknown'}
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: MERGE_STATUS_GRID,
+                  alignItems: 'center',
+                  gap: 10,
+                  padding: '11px 0',
+                  borderBottom: '1px solid var(--border-weak)',
+                  fontFamily: 'var(--fontFamilyMonospace)',
+                  fontSize: 12,
+                }}
+              >
+                <span
+                  style={{
+                    minWidth: 0,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    overflow: 'hidden',
+                    color: icon.color,
+                  }}
+                >
+                  <Icon name={icon.icon} size={14} />
+                  <span
+                    style={{
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      color: 'var(--fg-max)',
+                      fontFamily: 'var(--fontFamily)',
+                      fontSize: 12.5,
+                      fontWeight: 600,
+                    }}
+                  >
+                    {label}
+                  </span>
+                </span>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span
+                    style={{
+                      flex: 1,
+                      height: 6,
+                      borderRadius: 2,
+                      overflow: 'hidden',
+                      background: 'var(--bar-track)',
+                    }}
+                  >
+                    <span
+                      style={{
+                        display: 'block',
+                        width: `${Math.max(0, Math.min(100, (value / max) * 100))}%`,
+                        height: '100%',
+                        background: SHARE_FILL,
+                      }}
+                    />
+                  </span>
+                  <span style={{ width: 26, textAlign: 'right', color: 'var(--fg3)', fontSize: 10.5 }}>
+                    {unit === 'cost' && !costComplete ? '—' : `${share}%`}
+                  </span>
+                </span>
+                <span style={{ textAlign: 'right', color: 'var(--fg2)' }}>{formatInteger(row.count)}</span>
+                <span style={{ textAlign: 'right', color: unit === 'tokens' ? 'var(--fg-max)' : 'var(--fg1)' }}>
+                  {formatTokens(row.tokens)}
+                </span>
+                <span
+                  title={costEstimateTitle({ value: row.cost, complete: row.costComplete })}
+                  style={{ textAlign: 'right', color: unit === 'cost' ? 'var(--fg-max)' : 'var(--fg1)' }}
+                >
+                  {formatCostEstimate({ value: row.cost, complete: row.costComplete })}
+                </span>
+              </div>
             );
           })}
         </div>
@@ -1702,6 +2160,13 @@ function AnalyticsContent(props: ResolvedAnalyticsViewProps) {
         : aggregateWorkspaces(selectedCurrent, prices),
     [props.aggregate, selectedCurrent, prices],
   );
+  const branchRows = useMemo(
+    () =>
+      props.aggregate?.branch_rows
+        ? branchAggregateRows(props.aggregate.branch_rows, prices)
+        : aggregateBranches(selectedCurrent, prices),
+    [props.aggregate, selectedCurrent, prices],
+  );
   const modelRows = useMemo(
     () => aggregateModels(props.aggregate ? [props.aggregate] : selectedCurrent, prices),
     [props.aggregate, selectedCurrent, prices],
@@ -2043,6 +2508,30 @@ function AnalyticsContent(props: ResolvedAnalyticsViewProps) {
         onOpen={props.onOpenConversation}
         empty={empty}
       />
+
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'minmax(0, 1.35fr) minmax(0, 1fr)',
+          gap: 12,
+          marginTop: 12,
+        }}
+      >
+        <BranchesPanel
+          rows={branchRows}
+          unit={props.unit}
+          onOpen={props.onOpenWorkspace}
+          empty={empty}
+          loading={props.mergeLoading}
+        />
+        <MergeStatusPanel
+          rows={branchRows}
+          unit={props.unit}
+          empty={empty}
+          loading={props.mergeLoading}
+          error={props.mergeError}
+        />
+      </div>
     </>
   );
 }
