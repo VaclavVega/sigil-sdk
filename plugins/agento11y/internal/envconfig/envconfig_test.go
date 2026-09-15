@@ -705,3 +705,36 @@ func TestUpdateExistingLegacyAliases(t *testing.T) {
 		t.Errorf("UpdateExistingLegacyAliases() = %v, want %v", got, want)
 	}
 }
+
+func TestResolveAgentVersion(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{name: "unset keeps the host version", want: "1.0.0"},
+		{name: "preferred spelling", env: map[string]string{"AGENTO11Y_AGENT_VERSION": "2.0.0-e2e"}, want: "2.0.0-e2e"},
+		{name: "legacy spelling", env: map[string]string{"SIGIL_AGENT_VERSION": "legacy"}, want: "legacy"},
+		{
+			name: "preferred wins over legacy",
+			env: map[string]string{
+				"AGENTO11Y_AGENT_VERSION": "preferred",
+				"SIGIL_AGENT_VERSION":     "legacy",
+			},
+			want: "preferred",
+		},
+		{name: "blank keeps the host version", env: map[string]string{"AGENTO11Y_AGENT_VERSION": "  "}, want: "1.0.0"},
+		{name: "value is trimmed", env: map[string]string{"AGENTO11Y_AGENT_VERSION": "  3.1.4  "}, want: "3.1.4"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			PinAliasEnvBlank(t)
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
+			if got := ResolveAgentVersion("1.0.0"); got != tt.want {
+				t.Errorf("ResolveAgentVersion() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

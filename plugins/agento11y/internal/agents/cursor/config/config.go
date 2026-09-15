@@ -33,6 +33,10 @@ type Config struct {
 	// Load resolves it from AGENTO11Y_AGENT_NAME, then SIGIL_AGENT_NAME, and
 	// falls back to "cursor". Read it through Agent.
 	AgentName string
+	// AgentVersion overrides the version the session reports when non-empty.
+	// Load resolves it from AGENTO11Y_AGENT_VERSION, then SIGIL_AGENT_VERSION;
+	// blank keeps Cursor's own cursor_version.
+	AgentVersion string
 }
 
 // Agent returns the resolved agent identity, or "cursor" when AgentName is
@@ -77,5 +81,6 @@ func Load(logger *log.Logger) Config {
 		SkipPromptRedaction: !envconfig.ResolveRedactInput(logger),
 		Debug:               envconfig.ParseBool(envconfig.Getenv("DEBUG")),
 		AgentName:           envconfig.ResolveAgentName(mapper.AgentName),
+		AgentVersion:        envconfig.ResolveAgentVersion(""),
 	}
 }

@@ -53,3 +53,28 @@ func TestLoad_SkipPromptRedaction(t *testing.T) {
 		})
 	}
 }
+
+func TestLoad_AgentVersion(t *testing.T) {
+	tests := []struct {
+		name      string
+		preferred string
+		legacy    string
+		want      string
+	}{
+		{name: "blank when unset, so the session version stands", want: ""},
+		{name: "preferred spelling", preferred: "9.9.9", want: "9.9.9"},
+		{name: "legacy spelling", legacy: "8.8.8", want: "8.8.8"},
+		{name: "preferred wins", preferred: "9.9.9", legacy: "8.8.8", want: "9.9.9"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("AGENTO11Y_AGENT_VERSION", tt.preferred)
+			t.Setenv("SIGIL_AGENT_VERSION", tt.legacy)
+			cfg := Load(log.New(&bytes.Buffer{}, "", 0))
+			if cfg.AgentVersion != tt.want {
+				t.Errorf("AgentVersion = %q, want %q", cfg.AgentVersion, tt.want)
+			}
+		})
+	}
+}

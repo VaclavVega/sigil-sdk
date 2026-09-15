@@ -194,6 +194,7 @@ func Hook(ctx context.Context, stdin io.Reader, stdout io.Writer, logger *log.Lo
 		Logger:              logger,
 		ExtraTags:           extraTags,
 		AgentName:           resolvedAgentName,
+		AgentVersion:        envconfig.ResolveAgentVersion(""),
 		SkipPromptRedaction: skipPromptRedaction,
 	}, r)
 

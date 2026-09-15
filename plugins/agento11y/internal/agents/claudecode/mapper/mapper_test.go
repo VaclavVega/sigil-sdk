@@ -1650,3 +1650,28 @@ func TestProcess_SuppressSyntheticSubagentToolCallIDs(t *testing.T) {
 		})
 	}
 }
+
+// TestProcessHonorsAgentVersionOverride pins the AGENTO11Y_AGENT_VERSION
+// path: the override replaces the transcript's version on both fields, and
+// a blank override leaves the transcript's version alone.
+func TestProcessHonorsAgentVersionOverride(t *testing.T) {
+	lines := []transcript.Line{
+		makeUserLine("What is Go?"),
+		makeAssistantLine("claude-sonnet-4-20250514", 50, []transcript.ContentBlock{
+			{Type: "text", Text: "A language."},
+		}, "end_turn"),
+	}
+
+	gens, _ := Process(lines, &state.Session{}, Options{SessionID: "sess-1", AgentVersion: "9.9.9"}, nil)
+	if len(gens) != 1 {
+		t.Fatalf("got %d gens, want 1", len(gens))
+	}
+	if gens[0].AgentVersion != "9.9.9" || gens[0].EffectiveVersion != "9.9.9" {
+		t.Fatalf("AgentVersion = %q, EffectiveVersion = %q; want the override on both", gens[0].AgentVersion, gens[0].EffectiveVersion)
+	}
+
+	gens, _ = Process(lines, &state.Session{}, Options{SessionID: "sess-1"}, nil)
+	if gens[0].AgentVersion != "1.0.0" || gens[0].EffectiveVersion != "1.0.0" {
+		t.Fatalf("AgentVersion = %q, EffectiveVersion = %q; want the transcript version without an override", gens[0].AgentVersion, gens[0].EffectiveVersion)
+	}
+}

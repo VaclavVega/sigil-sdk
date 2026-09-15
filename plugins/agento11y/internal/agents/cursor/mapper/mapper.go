@@ -67,7 +67,11 @@ type Inputs struct {
 	SkipPromptRedaction bool
 	// AgentName overrides the exported agent identity. Blank means "cursor".
 	AgentName string
-	Now       time.Time
+	// AgentVersion overrides the version the session reports when non-empty,
+	// so AGENTO11Y_AGENT_VERSION applies to Cursor as it does to the other
+	// plugins. The history importer leaves it blank, as it does AgentName.
+	AgentVersion string
+	Now          time.Time
 }
 
 // agent is the agent name for this generation: the caller's override, or the
@@ -121,6 +125,10 @@ func MapFragment(in Inputs) Mapped {
 		isBackgroundAgent = in.Session.IsBackgroundAgent
 	}
 	title := conversationTitle(in.Session, frag, red)
+
+	if in.AgentVersion != "" {
+		cursorVersion = in.AgentVersion
+	}
 
 	tagMap := tags.Build(tags.BuiltinInputs{
 		WorkspaceRoot:     workspaceRoot,

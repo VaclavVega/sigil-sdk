@@ -34,6 +34,11 @@ type Options struct {
 	// backfill cannot reconstruct a past per-run override, and
 	// claudeFinalizeSubagentGens matches generations against the product name.
 	AgentName string
+	// AgentVersion overrides the version the transcript reports when non-empty,
+	// so AGENTO11Y_AGENT_VERSION applies to Claude Code as it does to the other
+	// plugins. The history importer leaves it blank for the same reason it
+	// leaves AgentName blank: a backfill cannot reconstruct a past override.
+	AgentVersion string
 	// SkipPromptRedaction exports the user prompt without redaction. The zero
 	// value redacts; envconfig.ResolveRedactInput owns the policy.
 	SkipPromptRedaction bool
@@ -562,8 +567,8 @@ func processAssistantLine(line transcript.Line, uctx *userContext, _ *state.Sess
 		ConversationID:    opts.SessionID,
 		ConversationTitle: opts.SessionID,
 		AgentName:         lineAgentName(line, opts.agent()),
-		AgentVersion:      line.Version,
-		EffectiveVersion:  line.Version,
+		AgentVersion:      opts.version(line),
+		EffectiveVersion:  opts.version(line),
 		Mode:              agento11y.GenerationModeSync,
 		OperationName:     "generateText",
 		Model: agento11y.ModelRef{
@@ -761,3 +766,12 @@ func generationID(line transcript.Line) string {
 }
 
 func ptrBool(b bool) *bool { return &b }
+
+// version returns the exported agent version: the override when one was
+// given, otherwise the version the transcript line reports.
+func (opts Options) version(line transcript.Line) string {
+	if opts.AgentVersion != "" {
+		return opts.AgentVersion
+	}
+	return line.Version
+}

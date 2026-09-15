@@ -886,3 +886,34 @@ func TestMapFragmentAgentNameOverride(t *testing.T) {
 		})
 	}
 }
+
+// TestMapFragment_AgentVersionOverride pins the AGENTO11Y_AGENT_VERSION path:
+// the override replaces the session's cursor_version on the generation and
+// its start, and a blank override keeps the session's version.
+func TestMapFragment_AgentVersionOverride(t *testing.T) {
+	session := &fragment.Session{CursorVersion: "0.45.2"}
+
+	got := MapFragment(Inputs{
+		Fragment:       basicFragment(t),
+		Session:        session,
+		ContentCapture: agento11y.ContentCaptureModeFull,
+		AgentVersion:   "9.9.9",
+		Now:            fixedTime,
+	})
+	if got.Generation.AgentVersion != "9.9.9" || got.Generation.EffectiveVersion != "9.9.9" {
+		t.Fatalf("AgentVersion = %q, EffectiveVersion = %q; want the override on both", got.Generation.AgentVersion, got.Generation.EffectiveVersion)
+	}
+	if got.Start.AgentVersion != "9.9.9" || got.Start.EffectiveVersion != "9.9.9" {
+		t.Fatalf("Start.AgentVersion = %q, Start.EffectiveVersion = %q; want the override on both", got.Start.AgentVersion, got.Start.EffectiveVersion)
+	}
+
+	got = MapFragment(Inputs{
+		Fragment:       basicFragment(t),
+		Session:        session,
+		ContentCapture: agento11y.ContentCaptureModeFull,
+		Now:            fixedTime,
+	})
+	if got.Generation.AgentVersion != "0.45.2" {
+		t.Fatalf("AgentVersion = %q; want the session version without an override", got.Generation.AgentVersion)
+	}
+}

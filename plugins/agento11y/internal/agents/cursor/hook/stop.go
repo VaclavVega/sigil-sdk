@@ -91,6 +91,7 @@ func Stop(p Payload, cfg config.Config, logger *log.Logger) {
 		UserIDOverride:      cfg.UserIDOverride,
 		SkipPromptRedaction: cfg.SkipPromptRedaction,
 		AgentName:           cfg.Agent(),
+		AgentVersion:        cfg.AgentVersion,
 		Now:                 time.Now(),
 	})
 

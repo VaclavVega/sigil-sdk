@@ -131,6 +131,7 @@ func emitOneStranded(
 		UserIDOverride:      cfg.UserIDOverride,
 		SkipPromptRedaction: cfg.SkipPromptRedaction,
 		AgentName:           cfg.Agent(),
+		AgentVersion:        cfg.AgentVersion,
 		Now:                 time.Now(),
 	})
 

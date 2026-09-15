@@ -317,6 +317,18 @@ func ResolveAgentName(def string) string {
 	return def
 }
 
+// ResolveAgentVersion returns the AGENT_VERSION override when one is set in
+// either branded family, or def, the version the host reported. It exists so
+// a plugin whose host always reports a version (Claude Code's transcript,
+// Cursor's session) can still honor the same variable the SDK's client
+// falls back to when a generation carries no version at all.
+func ResolveAgentVersion(def string) string {
+	if v, _, ok := LookupEnv("AGENT_VERSION"); ok {
+		return v
+	}
+	return def
+}
+
 // AutoTag names one value the launcher can resolve for the session and attach
 // as a client tag. Two variables drive it, both off by default:
 // AGENTO11Y_AUTO_CODING_AGENT_TAGS turns the mechanism on, and
