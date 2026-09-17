@@ -592,7 +592,7 @@ func TestReadTranscriptSettled_CapturesLateFinalTurn(t *testing.T) {
 	}()
 
 	logs := log.New(io.Discard, "", 0)
-	lines, safeOffset, rawCount := readTranscriptSettled(context.Background(), path, 0, logs)
+	lines, safeOffset, rawCount := readTranscriptSettled(context.Background(), path, 0, false, logs)
 
 	if rawCount != 3 {
 		t.Fatalf("rawCount = %d, want 3 (tool-use turn, tool_result, final turn)", rawCount)
@@ -603,6 +603,87 @@ func TestReadTranscriptSettled_CapturesLateFinalTurn(t *testing.T) {
 	}
 	if safeOffset != last.EndOffset {
 		t.Fatalf("safeOffset = %d, want %d (end of final turn)", safeOffset, last.EndOffset)
+	}
+}
+
+// TestReadTranscriptSettled_StopWaitsForTranscriptCreatedLate reproduces a
+// headless `claude -p` run whose Stop fires before Claude Code has created the
+// transcript: the read waits for the file instead of failing on it.
+func TestReadTranscriptSettled_StopWaitsForTranscriptCreatedLate(t *testing.T) {
+	prev := transcriptSettleWindow
+	transcriptSettleWindow = 2 * time.Second
+	t.Cleanup(func() { transcriptSettleWindow = prev })
+
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		_ = os.WriteFile(path, []byte(buildHookAssistantJSONL("late-file", "req_a", "end_turn", "done", 5)+"\n"), 0o644)
+	}()
+
+	lines, _, rawCount := readTranscriptSettled(context.Background(), path, 0, true, log.New(io.Discard, "", 0))
+	if rawCount != 1 || len(lines) != 1 {
+		t.Fatalf("rawCount=%d len(lines)=%d, want 1/1 (the turn written after Stop)", rawCount, len(lines))
+	}
+}
+
+// TestReadTranscriptSettled_StopWaitsPastToolUseTail reproduces the same race
+// one step later: at Stop the transcript ends at the turn that called a tool,
+// complete but not the end of the turn, and the tool result and closing reply
+// land a moment later.
+func TestReadTranscriptSettled_StopWaitsPastToolUseTail(t *testing.T) {
+	prev := transcriptSettleWindow
+	transcriptSettleWindow = 2 * time.Second
+	t.Cleanup(func() { transcriptSettleWindow = prev })
+
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	sessionID := "tool-use-tail"
+	if err := os.WriteFile(path, []byte(buildHookAssistantJSONL(sessionID, "req_a", "tool_use", "calling tool", 10)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			return
+		}
+		defer func() { _ = f.Close() }()
+		_, _ = f.WriteString(buildHookToolResultJSONL(sessionID, "tu_1", "tool ok") + "\n" +
+			buildHookAssistantJSONL(sessionID, "req_b", "end_turn", "all done", 5) + "\n")
+	}()
+
+	lines, _, rawCount := readTranscriptSettled(context.Background(), path, 0, true, log.New(io.Discard, "", 0))
+	if rawCount != 3 {
+		t.Fatalf("rawCount = %d, want 3 (tool-use turn, tool_result, final turn)", rawCount)
+	}
+	if last := lines[len(lines)-1]; last.RequestID != "req_b" {
+		t.Fatalf("last coalesced line RequestID = %q, want req_b (the closing turn)", last.RequestID)
+	}
+}
+
+// TestHook_OnlyStopWaitsForMissingTranscript pins which event waits for a
+// transcript Claude Code has not created yet. A Stop always follows a turn, so
+// it waits out the settle window. A SessionEnd can close a session that never
+// wrote a transcript, so it returns at once instead of delaying the exit.
+func TestHook_OnlyStopWaitsForMissingTranscript(t *testing.T) {
+	prev := transcriptSettleWindow
+	transcriptSettleWindow = time.Second
+	t.Cleanup(func() { transcriptSettleWindow = prev })
+	t.Setenv("SIGIL_ENDPOINT", "http://127.0.0.1:9000")
+	t.Setenv("SIGIL_AUTH_TENANT_ID", "")
+	t.Setenv("SIGIL_AUTH_TOKEN", "")
+	t.Setenv("SIGIL_OTEL_EXPORTER_OTLP_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+
+	missing := filepath.Join(t.TempDir(), "never-written.jsonl")
+	for _, tc := range []struct {
+		event    string
+		wantWait bool
+	}{{"Stop", true}, {"SessionEnd", false}} {
+		start := time.Now()
+		runHookForTest(t, hookInput{HookEventName: tc.event, SessionID: "missing-transcript", TranscriptPath: missing})
+		if waited := time.Since(start) >= transcriptSettleWindow; waited != tc.wantWait {
+			t.Errorf("%s waited out the settle window = %v, want %v", tc.event, waited, tc.wantWait)
+		}
 	}
 }
 
@@ -623,7 +704,7 @@ func TestReadTranscriptSettled_ReturnsImmediatelyWhenTerminal(t *testing.T) {
 	}
 
 	start := time.Now()
-	lines, safeOffset, rawCount := readTranscriptSettled(context.Background(), path, 0, log.New(io.Discard, "", 0))
+	lines, safeOffset, rawCount := readTranscriptSettled(context.Background(), path, 0, true, log.New(io.Discard, "", 0))
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("settled read took %s; expected near-immediate return", elapsed)
 	}
@@ -655,7 +736,7 @@ func TestReadTranscriptSettled_EmptyReadReturnsImmediately(t *testing.T) {
 	// Read from end-of-file: a prior export already consumed everything.
 	eof := int64(len(content))
 	start := time.Now()
-	lines, safeOffset, rawCount := readTranscriptSettled(context.Background(), path, eof, log.New(io.Discard, "", 0))
+	lines, safeOffset, rawCount := readTranscriptSettled(context.Background(), path, eof, false, log.New(io.Discard, "", 0))
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("empty read took %s; expected immediate return without waiting out the settle window", elapsed)
 	}
@@ -684,7 +765,7 @@ func TestReadTranscriptSettled_TrailingPromptAfterCompleteTurn(t *testing.T) {
 	}
 
 	start := time.Now()
-	lines, safeOffset, rawCount := readTranscriptSettled(context.Background(), path, 0, log.New(io.Discard, "", 0))
+	lines, safeOffset, rawCount := readTranscriptSettled(context.Background(), path, 0, false, log.New(io.Discard, "", 0))
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("trailing-prompt read took %s; expected immediate return (completed turn already present)", elapsed)
 	}
@@ -728,7 +809,7 @@ func TestReadTranscriptSettled_LonePromptWaitsForReply(t *testing.T) {
 		_, _ = f.WriteString(buildHookAssistantJSONL(sessionID, "req_a", "end_turn", "hello", 4) + "\n")
 	}()
 
-	lines, safeOffset, rawCount := readTranscriptSettled(context.Background(), path, 0, log.New(io.Discard, "", 0))
+	lines, safeOffset, rawCount := readTranscriptSettled(context.Background(), path, 0, false, log.New(io.Discard, "", 0))
 	if rawCount != 2 {
 		t.Fatalf("rawCount = %d, want 2 (prompt + late assistant reply)", rawCount)
 	}

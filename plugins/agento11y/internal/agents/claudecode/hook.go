@@ -6,8 +6,10 @@ package claudecode
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"strings"
@@ -172,7 +174,8 @@ func Hook(ctx context.Context, stdin io.Reader, stdout io.Writer, logger *log.Lo
 	}
 	defer func() { _ = otelProviders.Shutdown(hookCtx) }()
 
-	lines, safeOffset, rawCount := readTranscriptSettled(hookCtx, input.TranscriptPath, st.Offset, logger)
+	stop := strings.TrimSpace(input.HookEventName) == "Stop"
+	lines, safeOffset, rawCount := readTranscriptSettled(hookCtx, input.TranscriptPath, st.Offset, stop, logger)
 	if rawCount == 0 {
 		return nil
 	}
@@ -314,13 +317,19 @@ func handleUserPromptSubmit(ctx context.Context, stdout io.Writer, input *hookIn
 // a trailing tool_result, a partial assistant line, or a lone prompt awaiting
 // its first assistant reply triggers the bounded wait.
 //
+// A Stop means the turn is over, so on Stop the read also waits until the last
+// complete assistant turn ended the turn. Without CLAUDE_CODE_EAGER_FLUSH, a
+// headless `claude -p` run fires Stop before its transcript writes land: the
+// file may not exist yet, or may end at the turn that called a tool, and the
+// SessionEnd that would catch up is cancelled when -p exits.
+//
 // Returns the coalesced lines, the safe offset, and the raw line count so the
 // caller can distinguish "nothing to read" from "read but nothing complete".
-func readTranscriptSettled(ctx context.Context, path string, offset int64, logger *log.Logger) ([]transcript.Line, int64, int) {
+func readTranscriptSettled(ctx context.Context, path string, offset int64, stop bool, logger *log.Logger) ([]transcript.Line, int64, int) {
 	deadline := time.Now().Add(transcriptSettleWindow)
 	for {
 		raw, _, err := transcript.Read(path, offset)
-		if err != nil {
+		if err != nil && (!stop || !errors.Is(err, fs.ErrNotExist)) {
 			logger.Printf("read transcript: %v", err)
 			return nil, 0, 0
 		}
@@ -331,7 +340,13 @@ func readTranscriptSettled(ctx context.Context, path string, offset int64, logge
 		// flushing. An empty read (redundant Stop/SessionEnd after a prior
 		// export) has nothing to wait for, and tailNeedsSettle decides the rest.
 		settled := len(raw) == 0 || !tailNeedsSettle(raw[len(raw)-1], safeOffset)
+		if stop {
+			settled = settled && endsTurn(coalesced)
+		}
 		if settled || !time.Now().Before(deadline) {
+			if err != nil {
+				logger.Printf("read transcript: %v", err)
+			}
 			return coalesced, safeOffset, len(raw)
 		}
 
@@ -343,6 +358,16 @@ func readTranscriptSettled(ctx context.Context, path string, offset int64, logge
 		case <-timer.C:
 		}
 	}
+}
+
+// endsTurn reports whether the last coalesced line is an assistant turn that
+// ended the turn rather than stopping to call a tool.
+func endsTurn(lines []transcript.Line) bool {
+	if len(lines) == 0 || lines[len(lines)-1].Type != "assistant" {
+		return false
+	}
+	var msg transcript.AssistantMessage
+	return json.Unmarshal(lines[len(lines)-1].Message, &msg) == nil && msg.StopReason != "tool_use"
 }
 
 // tailNeedsSettle reports whether the last raw transcript line indicates an
