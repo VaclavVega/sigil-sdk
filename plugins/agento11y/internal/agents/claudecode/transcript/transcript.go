@@ -126,19 +126,6 @@ func ParseUserContent(raw json.RawMessage) (text string, blocks []UserContentBlo
 	return "", blocks, err
 }
 
-// skipTypes are line types we never process.
-var skipTypes = map[string]bool{
-	"file-history-snapshot": true,
-	"queue-operation":       true,
-	"attachment":            true,
-	"permission-mode":       true,
-	"last-prompt":           true,
-	// Claude Code emits these for UI title generation; not LLM turns.
-	"ai-title": true,
-	// local_command / stop_hook_summary / turn_duration metadata.
-	"system": true,
-}
-
 // maxLineBytes bounds one transcript line. Tool results can be large, so this
 // is generous. A line past it is skipped like an unparseable one and reading
 // continues, so one oversized line never costs the rest of the file. A var so
@@ -147,8 +134,9 @@ var maxLineBytes = 10 * 1024 * 1024
 
 // Read reads JSONL lines from path starting at the given byte offset.
 // Returns parsed lines, the new byte offset, and any I/O error.
-// Unparseable lines and lines longer than maxLineBytes are skipped; the
-// returned offset always advances past them.
+// Lines other than user and assistant turns, unparseable lines, and lines
+// longer than maxLineBytes are skipped; the returned offset always advances
+// past them.
 func Read(path string, offset int64) ([]Line, int64, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -185,7 +173,11 @@ func Read(path string, offset int64) ([]Line, int64, error) {
 			continue
 		}
 
-		if skipTypes[line.Type] {
+		// Only user and assistant lines carry turns. Claude Code writes many
+		// other kinds (ai-title, system, atis-latch, mode, ...); keeping any of
+		// them would let one sit at the tail of a read, where the Stop settle
+		// read mistakes it for a turn still landing.
+		if line.Type != "user" && line.Type != "assistant" {
 			continue
 		}
 

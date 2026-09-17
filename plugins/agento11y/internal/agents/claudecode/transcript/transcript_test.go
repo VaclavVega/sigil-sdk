@@ -53,6 +53,16 @@ func TestRead(t *testing.T) {
 			wantTypes: []string{"user", "assistant"},
 		},
 		{
+			name: "only user and assistant lines are kept",
+			content: `{"type":"user","sessionId":"sess1","message":{"role":"user","content":"hi"}}
+{"type":"atis-latch","sessionId":"sess1","atis":"x"}
+{"type":"assistant","sessionId":"sess1","message":{"model":"claude-sonnet-4-20250514","content":[],"usage":{"output_tokens":5}}}
+{"type":"mode","sessionId":"sess1","mode":"x"}
+{"type":"custom-title","sessionId":"sess1","customTitle":"my chat"}
+`,
+			wantTypes: []string{"user", "assistant"},
+		},
+		{
 			name: "unparseable lines are skipped",
 			content: `not json at all
 {"type":"assistant","sessionId":"sess1","message":{"model":"test","content":[],"usage":{"output_tokens":5}}}
